@@ -1,19 +1,29 @@
 # Lanthanide automation · TURBOMOLE 7.9 on VACC
 
-One shared toolset for **14 Ln3+ metals (La–Lu, excluding Pm)**. 
-Run it from **any one of your 16 EF project directories** (small/large model × ECP/X2CSR × EF1738–EF1741). 
-The project's own `control`, `coord`, `def.inp`, and Gd `def_gd.inp` determine the level of theory.
+Prepare, submit, monitor, and recover **14 Ln³⁺ calculations (La–Lu, excluding Pm)** using a shared command-line toolset. Developed for **UVM's Vermont Advanced Computing Center (VACC)** with TURBOMOLE 7.9 and SLURM. The multi-stage workflow can be adapted to other HPC clusters by adjusting their SLURM resources, software modules, and scratch configuration.
 
-## Install once in `~/bin`
+Run the commands from a project directory containing `control`, `coord`, and `def.inp` (and `def_gd.inp` when preparing Gd). Each project's input files define the molecular system and theory; the tools can be reused across multiple models, methods (ECP/X2CSR), and binding sites.
 
-Upload the ZIP to your home directory, then:
+## Install once on VACC (from GitLab)
+
+Copy the **SSH clone URL** from this repository's GitLab page, then on VACC:
 
 ```bash
-mkdir -p ~/bin
-unzip -o ~/lanthanide_automation.zip -d ~/bin
-bash ~/bin/lanthanide_automation/install.sh
-export PATH="$HOME/bin:$PATH"   # add to ~/.bashrc if needed for future logins
+mkdir -p ~/src ~/bin
+git clone <SSH-CLONE-URL> ~/src/lanthanide_automation
+bash ~/src/lanthanide_automation/install.sh
+export PATH="$HOME/bin:$PATH"   # add to ~/.bashrc only if ~/bin is not already in PATH
 ```
+
+For a private repository, the VACC account also needs GitLab SSH-key access (separate from your Mac). The installer adds `lan-run`, `lan-recover`, `lan-setup`, and `lan-status` to `~/bin`. You don't need to copy the tools into every calculation project. To update an existing installation:
+
+```bash
+cd ~/src/lanthanide_automation
+git pull --ff-only
+bash install.sh
+```
+
+**Requirements:** VACC account, Git access, Python 3, TURBOMOLE 7.9, and SLURM. Installation does not submit jobs.
 
 ## Four commands to remember
 
