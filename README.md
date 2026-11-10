@@ -1,6 +1,6 @@
 # Lanthanide automation · TURBOMOLE 7.9 on VACC
 
-Prepare, submit, monitor, and recover **14 Ln³⁺ calculations (La–Lu, excluding Pm)** using a shared command-line toolset. Developed for **UVM's Vermont Advanced Computing Center (VACC)** with TURBOMOLE 7.9 and SLURM. The multi-stage workflow can be adapted to other HPC clusters by adjusting their SLURM resources, software modules, and scratch configuration.
+Prepare, submit, monitor, and recover **14 Ln3+ calculations (La–Lu, excluding Pm)** using a shared command-line toolset. Developed for **UVM's Vermont Advanced Computing Center (VACC)** with TURBOMOLE 7.9 and SLURM. The multi-stage workflow can be adapted to other HPC clusters by adjusting their SLURM resources, software modules, and scratch configuration.
 
 Run the commands from a project directory containing `control`, `coord`, and `def.inp` (and `def_gd.inp` when preparing Gd). Each project's input files define the molecular system and theory; the tools can be reused across multiple models, methods (ECP/X2CSR), and binding sites.
 
@@ -15,7 +15,7 @@ bash ~/src/lanthanide_automation/install.sh
 export PATH="$HOME/bin:$PATH"   # add to ~/.bashrc only if ~/bin is not already in PATH
 ```
 
-For a private repository, the VACC account also needs GitLab SSH-key access (separate from your Mac). The installer adds `lan-run`, `lan-recover`, `lan-setup`, and `lan-status` to `~/bin`. You don't need to copy the tools into every calculation project. To update an existing installation:
+The installer adds `lan-run`, `lan-recover`, `lan-setup`, and `lan-status` to `~/bin`. To update an existing installation:
 
 ```bash
 cd ~/src/lanthanide_automation
@@ -23,7 +23,7 @@ git pull --ff-only
 bash install.sh
 ```
 
-**Requirements:** VACC account, Git access, Python 3, TURBOMOLE 7.9, and SLURM. Installation does not submit jobs.
+**Requirements:** VACC account, Python 3, TURBOMOLE 7.9, and SLURM. 
 
 ## Four commands to remember
 
