@@ -1,8 +1,10 @@
 # Lanthanide automation · TURBOMOLE 7.9 on VACC
 
-Prepare, submit, monitor, and recover **14 Ln3+ calculations (La–Lu, excluding Pm)** using a shared command-line toolset. Developed for **UVM's Vermont Advanced Computing Center (VACC)** with TURBOMOLE 7.9 and SLURM. The multi-stage workflow can be adapted to other HPC clusters by adjusting their SLURM resources, software modules, and scratch configuration.
+Prepare, submit, monitor, and recover **14 Ln³⁺ calculations (La–Lu, excluding Pm)** using a shared command-line toolset. Developed for **UVM's Vermont Advanced Computing Center (VACC)** with TURBOMOLE 7.9 and SLURM, the multi-stage workflow can be adapted to other HPC clusters by adjusting their SLURM resources, software modules, and scratch configuration.
 
-Run the commands from a project directory containing `control`, `coord`, and `def.inp` (and `def_gd.inp` when preparing Gd). Each project's input files define the molecular system and theory; the tools can be reused across multiple models, methods (ECP/X2CSR), and binding sites.
+A representative calculation is first configured interactively using `tee def.inp | define`, which records the setup instructions in `def.inp`. A  master `control` file needs to prepared. The automation then reuses these templates, followed by SCF calculations (`ridft`), geometry optimization (`jobex`), and Hessian calculations (`aoforce` or `NumForce`). Although developed for lanthanides, the approach is readily generalizable to other elements and systematic DFT benchmarking studies involving different basis sets, functionals, and molecular systems.
+
+Run the commands from a project directory containing `control`, `coord`, and `def.inp` (and `def_gd.inp` when preparing Gd). Each project's input files define the molecular system and theory.
 
 ## Install once on VACC (from GitLab)
 
