@@ -8,8 +8,9 @@ cat <<'HELP'
 Restart RIDFT after manual SCF adjustments in an existing metal folder.
 No define or input replacement. Run from the EF project directory.
 
-Usage: lan-recover [num|ao] --metal METAL [mode]   (default: num)
-  num = NumForce; ao = aoforce (full names also accepted).
+Usage: lan-recover [num|ao] --metal METAL [mode]   (default: no Hessian)
+  No selector = stop after post-JOBEX EIGER; num = NumForce; ao = aoforce.
+  Full names numforce/aoforce also accepted.
 
 Modes (choose one):
   --ridft-only     Restart only RIDFT (default); inspect results manually
@@ -19,9 +20,11 @@ Modes (choose one):
 Other options: --base DIR (default: current directory); -h, --help
 
 Examples:
-  lan-recover num --metal tb                  # RIDFT only
-  lan-recover num --metal tb --continue-only  # continue after successful RIDFT
-  lan-recover ao --metal gd --full-chain      # RIDFT + all following stages
+  lan-recover --metal tb                      # RIDFT only
+  lan-recover --metal tb --continue-only      # continue, no Hessian
+  lan-recover --metal gd --full-chain         # RIDFT + all subsequent stages, no Hessian
+  lan-recover ao --metal gd --full-chain      # RIDFT + aoforce
+  lan-recover num --metal tb --continue-only  # continue + NumForce
 
 Check/cancel old queued jobs for this metal before recovery. Other metals
 are unaffected. Later occupation_fix still restores occupations/removes $fermi.
@@ -29,7 +32,7 @@ HELP
 }
 
 mode='ridft-only'
-frequency='numforce'
+frequency='none'
 base="$PWD"
 metal=''
 while (($#)); do
@@ -109,7 +112,11 @@ submit_one() {
     local args=(--parsable --job-name="tm-${metal}-${stage}" --partition="$partition"
                 --time="$time" --mem="$mem" --cpus-per-task="$cpus")
     if [[ "$script" == 'turbo.pipeline.optimized.slurm' ]]; then
-        args+=(--export="ALL,TM_STAGE=$stage")
+        local export_spec="ALL,TM_STAGE=$stage"
+        if [[ "$frequency" == none && "$stage" == eiger_post ]]; then
+            export_spec+=",TM_FINAL_NO_HESSIAN=1"
+        fi
+        args+=(--export="$export_spec")
     fi
     if [[ -n "$dep" ]]; then args+=(--dependency="afterok:$dep"); fi
     raw="$(cd "$dir" && sbatch "${args[@]}" "$script")" || {
@@ -126,7 +133,9 @@ if [[ "$mode" != 'continue-only' ]]; then
     submit_one ridft-recovery turbo.resume.slurm general "$RECOVERY_TIME" "$RECOVERY_MEM" "$RECOVERY_CPUS"
 fi
 if [[ "$mode" != 'ridft-only' ]]; then
-    for stage in eiger_pre occupation_fix integer_ridft jobex eiger_post "$frequency"; do
+    stages=(eiger_pre occupation_fix integer_ridft jobex eiger_post)
+    if [[ "$frequency" != none ]]; then stages+=("$frequency"); fi
+    for stage in "${stages[@]}"; do
         partition=general
         case "$stage" in
             eiger_*) time='00:10:00'; mem="$EIGER_MEM"; cpus="$EIGER_CPUS" ;;

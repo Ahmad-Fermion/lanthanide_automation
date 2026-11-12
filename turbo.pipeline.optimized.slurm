@@ -132,6 +132,9 @@ case "$stage" in
             echo 'WARNING: eiger failed after jobex; continuing' >&2
         fi
         python3 tm_workflow.py eiger eiger.after_jobex.out post || true
+        if [[ "${TM_FINAL_NO_HESSIAN:-0}" == 1 ]]; then
+            python3 tm_workflow.py record DONE SUCCESS 'Geometry optimization completed; Hessian intentionally skipped'
+        fi
         ;;
 
     numforce)

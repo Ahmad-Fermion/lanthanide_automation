@@ -2,7 +2,7 @@
 
 Prepare, submit, monitor, and recover **14 Ln3+ calculations (La–Lu, excluding Pm)** using a shared command-line toolset. Developed for **UVM's Vermont Advanced Computing Center (VACC)** with TURBOMOLE 7.9 and SLURM, the multi-stage workflow can be adapted to other HPC clusters by adjusting their SLURM resources, software modules, and scratch configuration.
 
-A representative calculation is first configured interactively using `tee def.inp | define`, which records the setup instructions in `def.inp`. A  master `control` file needs to prepared. The automation then reuses these templates, followed by SCF calculations (`ridft`), geometry optimization (`jobex`), and Hessian calculations (`aoforce` or `NumForce`). Although developed for lanthanides, the approach is readily generalizable to other elements and systematic DFT benchmarking studies involving different basis sets, functionals, and molecular systems.
+A representative calculation is first configured interactively using `tee def.inp | define`, which records the setup instructions in `def.inp`. A  master `control` file needs to prepared. The automation then reuses these templates, followed by SCF calculations (`ridft`), geometry optimization (`jobex`), and optional Hessian calculations (`aoforce` or `NumForce`). Although developed for lanthanides, the approach is readily generalizable to other elements and systematic DFT benchmarking studies involving different basis sets, functionals, and molecular systems.
 
 Run the commands from a project directory containing `control`, `coord`, and `def.inp` (and `def_gd.inp` when preparing Gd). Each project's input files define the molecular system and theory.
 
@@ -36,7 +36,7 @@ bash install.sh
 | `lan-setup` | Prepare folders **only**, without submitting |
 | `lan-status` | Show progress; write `workflow_status.csv` |
 
-Choose `num` = **NumForce** (for X2CSR) or `ao` = **aoforce**. Full names `numforce`/`aoforce` also work. Default is `num`.
+By default, `lan-run` stops after geometry optimization and the post-optimization EIGER check, with **no Hessian** (useful for large models). Choose `lan-run num` = **NumForce** (for X2CSR) or `lan-run ao` = **aoforce** to include a Hessian. Full names `numforce`/`aoforce` also work.
 
 ## Common examples
 
@@ -46,7 +46,7 @@ Run from a single EF project directory, e.g.:
 cd ~/lanM_shared/small-model/x2csr-d4-wd-scf7/EF1738
 lan-run num --metals sm --prepare-only      # create only Sm for inspection
 lan-run num --metals sm --include-existing  # submit that prepared Sm
-lan-run num                                 # submit all other *missing* metals
+lan-run                                     # submit all other *missing* metals, no Hessian
 lan-run ao                                  # same workflow, ending with aoforce
 lan-run ao --metals gd tb                   # only new Gd/Tb (Gd uses def_gd.inp)
 lan-status                                  # progress + workflow_status.csv
@@ -59,19 +59,23 @@ lan-status                                  # progress + workflow_status.csv
 After the original failed/blocked jobs are stopped, edit e.g., `tb/control` manually. From the EF project directory:
 
 ```bash
-lan-recover num --metal tb                  # run only RIDFT; inspect state
-lan-recover num --metal tb --continue-only  # later, if recovery converged
+lan-recover --metal tb                      # run only RIDFT; inspect state
+lan-recover --metal tb --continue-only      # later, if recovery converged; no Hessian
 ```
 
 Or, if confident in your changes:
 
 ```bash
-lan-recover num --metal tb --full-chain     # resume RIDFT + all later stages
+lan-recover --metal tb --full-chain         # resume RIDFT + later stages; no Hessian
+lan-recover ao --metal tb --full-chain      # same, ending with aoforce
+lan-recover num --metal tb --continue-only  # continue after recovery, ending with NumForce
 ```
+
+Like `lan-run`, `lan-recover` only requests a Hessian when `ao` or `num` is specified. `--ridft-only` remains the default recovery mode and never schedules later stages.
 
 ## What happens automatically
 
-`define < def.inp` → `ridft` → `eiger` → occupation fix → second `ridft` → `jobex` → `eiger` → `NumForce`/**`aoforce`**. Each expensive stage has its own **48-hour `general`** allocation; EIGER takes 10 minutes; the occupation edit gets **10 minutes, 1 CPU, 1 GB on `short`**. Jobs use `afterok` dependencies.
+`define < def.inp` → `ridft` → `eiger` → occupation fix → second `ridft` → `jobex` → `eiger` → **stop** (default `lan-run`), or → `NumForce`/**`aoforce`** (`lan-run num`/`lan-run ao`). Each expensive stage has its own **48-hour `general`** allocation; EIGER takes 10 minutes; the occupation edit gets **10 minutes, 1 CPU, 1 GB on `short`**. Jobs use `afterok` dependencies.
 
 After `define`, the initial integer alpha/beta shell assignments are saved in `initial_occupations`. The occupation-fix stage restores those blocks and **removes `$fermi`** before the second RIDFT (existing behavior). Orbital holes are **warnings**; true SCF or geometry failure blocks downstream jobs. `control` is the only TURBOMOLE control file; no `control.template`. The validated NumForce OpenMP environment and `PARNODES=1 NumForce -ri -central` remain unchanged.
 

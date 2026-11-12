@@ -9,7 +9,8 @@ cat <<'HELP'
 Submit TURBOMOLE lanthanide jobs on VACC (14 metals; Pm excluded).
 Run from an EF project directory containing control, coord and def.inp.
 
-Usage: lan-run [num|ao] [options]       (default: num)
+Usage: lan-run [num|ao] [options]       (default: no Hessian)
+  lan-run = geometry optimization only (no Hessian)
   num = NumForce; ao = aoforce (full names also accepted).
 
 Options:
@@ -22,7 +23,8 @@ Options:
 Examples:
   lan-run num --metals sm --prepare-only  # prepare Sm for inspection
   lan-run num --metals sm --include-existing  # submit prepared Sm
-  lan-run ao                              # create/submit missing metals
+  lan-run                                 # create/submit missing metals, no Hessian
+  lan-run ao                              # create/submit missing metals, aoforce
   lan-run num --metals gd tb              # two metals, NumForce
 
 Existing metal folders are never modified. New gd/ requires master def_gd.inp.
@@ -33,7 +35,7 @@ HELP
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 base="$PWD"
-frequency='numforce'
+frequency='none'
 prepare_only=0
 include_existing=0
 metals=(la ce pr nd sm eu gd tb dy ho er tm yb lu)
@@ -124,7 +126,8 @@ submit_metal() {
 
     # The submit call must run FROM the metal directory, so SLURM_SUBMIT_DIR
     # and all TURBOMOLE output files refer to that directory.
-    local stages=(ridft eiger_pre occupation_fix integer_ridft jobex eiger_post "$frequency")
+    local stages=(ridft eiger_pre occupation_fix integer_ridft jobex eiger_post)
+    if [[ "$frequency" != none ]]; then stages+=("$frequency"); fi
     for stage in "${stages[@]}"; do
         partition='general'
         case "$stage" in
@@ -134,10 +137,14 @@ submit_metal() {
             jobex) time_limit='2-00:00:00'; memory="$JOBEX_MEM"; cpus="$TM_CPUS" ;;
             numforce|aoforce) time_limit='2-00:00:00'; memory="$HESS_MEM"; cpus="$TM_CPUS" ;;
         esac
+        local export_spec="ALL,TM_STAGE=$stage"
+        if [[ "$frequency" == none && "$stage" == eiger_post ]]; then
+            export_spec+=",TM_FINAL_NO_HESSIAN=1"
+        fi
         local opts=(--parsable --partition="$partition" --time="$time_limit"
                     --mem="$memory" --cpus-per-task="$cpus"
                     --job-name="tm-${metal}-${stage}"
-                    --export="ALL,TM_STAGE=$stage")
+                    --export="$export_spec")
         if [[ -n "$dep" ]]; then opts+=("--dependency=afterok:$dep"); fi
         if ! raw="$(cd "$dir" && sbatch "${opts[@]}" turbo.pipeline.optimized.slurm)"; then
             echo "ERROR $metal: sbatch failed at $stage. Previously submitted stages are listed in $dir/chain_submission.tsv." >&2
@@ -155,7 +162,11 @@ submit_metal() {
         printf '%-2s %-14s %-10s %s\n' "$metal" "$stage" "$jid" "${dep:+afterok:$dep}"
         dep="$jid"
     done
-    echo "SUBMITTED $metal: 7-stage $frequency chain (final SLURM job $dep)"
+    if [[ "$frequency" == none ]]; then
+        echo "SUBMITTED $metal: 6-stage geometry-only chain (no Hessian; final SLURM job $dep)"
+    else
+        echo "SUBMITTED $metal: 7-stage $frequency chain (final SLURM job $dep)"
+    fi
 }
 
 for metal in "${submit_metals[@]}"; do submit_metal "$metal"; done
