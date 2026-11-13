@@ -17,7 +17,7 @@ bash ~/src/lanthanide_automation/install.sh
 export PATH="$HOME/bin:$PATH"   # add to ~/.bashrc only if ~/bin is not already in PATH
 ```
 
-The installer adds `lan-run`, `lan-recover`, `lan-setup`, and `lan-status` to `~/bin`. To update an existing installation:
+The installer adds `lan-run`, `lan-recover`, `lan-setup`, and `lan-status` to `~/bin`, including the submission safety checker used by `lan-run`. To update an existing installation:
 
 ```bash
 cd ~/src/lanthanide_automation
@@ -52,7 +52,20 @@ lan-run ao --metals gd tb                   # only new Gd/Tb (Gd uses def_gd.inp
 lan-status                                  # progress + workflow_status.csv
 ```
 
-`--include-existing` is for a prepared folder that has **not** already been chain-submitted; `chain_submission.tsv` prevents duplicate chain submission. Without this flag, existing folders are **skipped and never modified**.
+`--include-existing` is only for a **pristine, never-run** directory created by `lan-setup`. Before submission, the tool now checks that the metal-specific `control`, `coord`, `def.inp`, and `metal.json` match freshly prepared inputs from the current project masters, and that no calculation outputs, queued jobs, or other unexpected files are present. If a project master was changed after setup, the directory is conservatively refused for manual review. It will **not** run `define` in an edited or previously calculated directory. Without `--include-existing`, existing folders are skipped. No previously existing scientific files are overwritten during these checks.
+
+### Interrupted SLURM submissions
+
+If a `sbatch` submission fails for one metal, `lan-run` records the partial chain, reports an error, **continues submitting other metals**, and exits nonzero at the end if there were failures. It does not restart already submitted jobs. To resume only the **missing submissions**, explicitly use the same `num`/`ao` selector as the original command:
+
+```bash
+lan-run num --metals gd --resume-partial  # only unsent stages of an interrupted NumForce chain
+lan-run --metals sm --resume-partial      # only unsent stages of a no-Hessian chain
+```
+
+The new `chain_plan.txt` records the original full 3- or 4-job stage plan; `chain_submission.tsv` records each accepted SLURM job ID. Resumption checks that the recorded stages are a valid prefix of that plan and queries `squeue` and `sacct` for the previous jobs' states and working directory. It depends on the last job if still active, or submits the next stage without a stale dependency only after confirming the last job finished successfully. The calculations themselves are **not rerun**. Failed, canceled, missing, mismatched, or ambiguous job records stop resumption and require manual review or `lan-recover` as appropriate. `--resume-partial` requires `--metals` and cannot be mixed with `--include-existing`.
+
+**Important:** Previously submitted chains from the older tool do not have `chain_plan.txt`, so they are **not automatically resumable** by this new command. The original Hessian choice cannot safely be inferred from an incomplete record. A `.lan_submission_pending` marker means the tool may have been interrupted after SLURM accepted a job but before its ID was saved; inspect SLURM carefully before reconciliation, and do not blindly delete this marker or `chain_submission.tsv`. A `.lan_submission_lock` prevents concurrent submissions to the same metal; stale locks also require manual verification.
 
 ## When RIDFT needs manual intervention
 
