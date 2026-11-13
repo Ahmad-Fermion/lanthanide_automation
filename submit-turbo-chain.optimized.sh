@@ -123,22 +123,27 @@ submit_metal() {
         echo "SKIP SUBMIT $metal: chain_submission.tsv exists (prevents duplicate jobs)"
         return 0
     fi
+    # Existing folders are preserved: refuse to submit consolidated stage names
+    # against a previous copy of the per-metal SLURM script.
+    if ! grep -Fq 'ridft_eiger_fix' "$dir/turbo.pipeline.optimized.slurm" ||
+       ! grep -Fq 'jobex_eiger' "$dir/turbo.pipeline.optimized.slurm"; then
+        echo "SKIP SUBMIT $metal: per-metal SLURM script does not support consolidated stages; review/update it manually." >&2
+        return 0
+    fi
 
     # The submit call must run FROM the metal directory, so SLURM_SUBMIT_DIR
     # and all TURBOMOLE output files refer to that directory.
-    local stages=(ridft eiger_pre occupation_fix integer_ridft jobex eiger_post)
+    local stages=(ridft_eiger_fix integer_ridft jobex_eiger)
     if [[ "$frequency" != none ]]; then stages+=("$frequency"); fi
     for stage in "${stages[@]}"; do
         partition='general'
         case "$stage" in
-            eiger_*) time_limit='00:10:00'; memory="$EIGER_MEM"; cpus="$EIGER_CPUS" ;;
-            occupation_fix) partition='short'; time_limit='00:10:00'; memory='1G'; cpus='1' ;;
-            ridft|integer_ridft) time_limit='2-00:00:00'; memory="$RIDFT_MEM"; cpus="$TM_CPUS" ;;
-            jobex) time_limit='2-00:00:00'; memory="$JOBEX_MEM"; cpus="$TM_CPUS" ;;
+            ridft_eiger_fix|integer_ridft) time_limit='2-00:00:00'; memory="$RIDFT_MEM"; cpus="$TM_CPUS" ;;
+            jobex_eiger) time_limit='2-00:00:00'; memory="$JOBEX_MEM"; cpus="$TM_CPUS" ;;
             numforce|aoforce) time_limit='2-00:00:00'; memory="$HESS_MEM"; cpus="$TM_CPUS" ;;
         esac
         local export_spec="ALL,TM_STAGE=$stage"
-        if [[ "$frequency" == none && "$stage" == eiger_post ]]; then
+        if [[ "$frequency" == none && "$stage" == jobex_eiger ]]; then
             export_spec+=",TM_FINAL_NO_HESSIAN=1"
         fi
         local opts=(--parsable --partition="$partition" --time="$time_limit"
@@ -163,9 +168,9 @@ submit_metal() {
         dep="$jid"
     done
     if [[ "$frequency" == none ]]; then
-        echo "SUBMITTED $metal: 6-stage geometry-only chain (no Hessian; final SLURM job $dep)"
+        echo "SUBMITTED $metal: 3-job geometry-only chain (6 scientific stages; no Hessian; final SLURM job $dep)"
     else
-        echo "SUBMITTED $metal: 7-stage $frequency chain (final SLURM job $dep)"
+        echo "SUBMITTED $metal: 4-job $frequency chain (7 scientific stages; final SLURM job $dep)"
     fi
 }
 

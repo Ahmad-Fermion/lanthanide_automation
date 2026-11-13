@@ -75,6 +75,12 @@ if [[ "$mode" == continue-only ]]; then
     }
 fi
 if [[ "$mode" != ridft-only ]]; then
+    if ! grep -Fq 'eiger_fix_integer_ridft' "$dir/turbo.pipeline.optimized.slurm" ||
+       ! grep -Fq 'jobex_eiger' "$dir/turbo.pipeline.optimized.slurm"; then
+        echo 'ERROR: per-metal SLURM script does not support consolidated recovery stages.' >&2
+        echo 'Review and manually update the metal/turbo.pipeline.optimized.slurm before submitting recovery.' >&2
+        exit 1
+    fi
     [[ -s "$dir/initial_occupations" ]] || {
         echo 'ERROR: initial_occupations missing; the normal occupation_fix stage requires it.' >&2; exit 1;
     }
@@ -113,7 +119,7 @@ submit_one() {
                 --time="$time" --mem="$mem" --cpus-per-task="$cpus")
     if [[ "$script" == 'turbo.pipeline.optimized.slurm' ]]; then
         local export_spec="ALL,TM_STAGE=$stage"
-        if [[ "$frequency" == none && "$stage" == eiger_post ]]; then
+        if [[ "$frequency" == none && "$stage" == jobex_eiger ]]; then
             export_spec+=",TM_FINAL_NO_HESSIAN=1"
         fi
         args+=(--export="$export_spec")
@@ -133,15 +139,13 @@ if [[ "$mode" != 'continue-only' ]]; then
     submit_one ridft-recovery turbo.resume.slurm general "$RECOVERY_TIME" "$RECOVERY_MEM" "$RECOVERY_CPUS"
 fi
 if [[ "$mode" != 'ridft-only' ]]; then
-    stages=(eiger_pre occupation_fix integer_ridft jobex eiger_post)
+    stages=(eiger_fix_integer_ridft jobex_eiger)
     if [[ "$frequency" != none ]]; then stages+=("$frequency"); fi
     for stage in "${stages[@]}"; do
         partition=general
         case "$stage" in
-            eiger_*) time='00:10:00'; mem="$EIGER_MEM"; cpus="$EIGER_CPUS" ;;
-            occupation_fix) partition=short; time='00:10:00'; mem=1G; cpus=1 ;;
-            integer_ridft) time='2-00:00:00'; mem="$RIDFT_MEM"; cpus="$TM_CPUS" ;;
-            jobex) time='2-00:00:00'; mem="$JOBEX_MEM"; cpus="$TM_CPUS" ;;
+            eiger_fix_integer_ridft) time='2-00:00:00'; mem="$RIDFT_MEM"; cpus="$TM_CPUS" ;;
+            jobex_eiger) time='2-00:00:00'; mem="$JOBEX_MEM"; cpus="$TM_CPUS" ;;
             numforce|aoforce) time='2-00:00:00'; mem="$HESS_MEM"; cpus="$TM_CPUS" ;;
         esac
         submit_one "$stage" turbo.pipeline.optimized.slurm "$partition" "$time" "$mem" "$cpus"

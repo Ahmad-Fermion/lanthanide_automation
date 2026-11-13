@@ -75,10 +75,19 @@ Like `lan-run`, `lan-recover` only requests a Hessian when `ao` or `num` is spec
 
 ## What happens automatically
 
-`define < def.inp` → `ridft` → `eiger` → occupation fix → second `ridft` → `jobex` → `eiger` → **stop** (default `lan-run`), or → `NumForce`/**`aoforce`** (`lan-run num`/`lan-run ao`). Each expensive stage has its own **48-hour `general`** allocation; EIGER takes 10 minutes; the occupation edit gets **10 minutes, 1 CPU, 1 GB on `short`**. Jobs use `afterok` dependencies.
+`define < def.inp` → `ridft` → `eiger` → occupation fix → second `ridft` → `jobex` → `eiger` → **stop** (default `lan-run`), or → `NumForce`/**`aoforce`** (`lan-run num`/`lan-run ao`). The **scientific steps and their order are unchanged**, but lightweight steps run inside existing compute allocations:
+
+- **Job 1:** `define` + initial RIDFT + pre-optimization EIGER + occupation fix.
+- **Job 2:** integer-occupation RIDFT.
+- **Job 3:** JOBEX + post-optimization EIGER; finish here for `lan-run` without Hessian.
+- **Job 4 (optional):** NumForce or aoforce.
+
+Thus `lan-run` submits **3 dependent jobs** without a Hessian, or **4** with one. The three expensive SCF/optimization stages and optional Hessian keep separate **48-hour `general`** allocations with their existing CPU/memory settings. EIGER and occupation editing execute inside those jobs; no extra EIGER/`short` allocations are submitted. Jobs use `afterok` dependencies.
+
+`lan-recover --full-chain` similarly uses **3 jobs** without Hessian, or **4** with it: recovered RIDFT (without `define`), combined EIGER + occupation fix + integer RIDFT, then JOBEX + EIGER, then optional Hessian. `--continue-only` skips the recovered RIDFT job (**2 or 3 jobs**); `--ridft-only` remains **1 job**. Pre-existing metal folders are not modified automatically: older copies of the per-metal SLURM script must be reviewed and updated manually before using these consolidated stages.
 
 After `define`, the initial integer alpha/beta shell assignments are saved in `initial_occupations`. The occupation-fix stage restores those blocks and **removes `$fermi`** before the second RIDFT (existing behavior). Orbital holes are **warnings**; true SCF or geometry failure blocks downstream jobs. `control` is the only TURBOMOLE control file; no `control.template`. The validated NumForce OpenMP environment and `PARNODES=1 NumForce -ri -central` remain unchanged.
 
-**Requirements:** Python 3, SLURM, TURBOMOLE 7.9 on VACC. For new `gd/`, provide `def_gd.inp` in the project root. Defaults: 20 CPUs/20 GB for RIDFT/JOBEX, 100 GB for frequency; overrides via `TM_CPUS`, `RIDFT_MEM`, `JOBEX_MEM`, `HESS_MEM`, `EIGER_CPUS`, `EIGER_MEM`.
+**Requirements:** Python 3, SLURM, TURBOMOLE 7.9 on VACC. For new `gd/`, provide `def_gd.inp` in the project root. Defaults: 20 CPUs/20 GB for RIDFT/JOBEX, 100 GB for frequency; overrides via `TM_CPUS`, `RIDFT_MEM`, `JOBEX_MEM`, `HESS_MEM`, `EIGER_CPUS`, `EIGER_MEM` (legacy standalone-stage settings; not used by consolidated submissions).
 
 **Help:** `lan-run --help`, `lan-recover --help`, `lan-setup --help`, `lan-status --help`. The per-metal files (including `chain_submission.tsv`, `initial_occupations`, stage logs and warnings) remain in that EF project. Verify orbitals/occupations and frequencies scientifically.

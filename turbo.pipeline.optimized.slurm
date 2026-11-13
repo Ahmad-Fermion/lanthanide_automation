@@ -1,5 +1,5 @@
 #!/bin/bash
-# VACC/TURBOMOLE 7.9: one SLURM allocation for ONE calculation stage.
+# VACC/TURBOMOLE 7.9: group lightweight stages into compute allocations.
 # Do not sbatch this file directly: submit-turbo-chain.optimized.sh supplies
 # TM_STAGE and creates the afterok dependency chain.
 #SBATCH --job-name=tm-stage
@@ -48,15 +48,16 @@ cd "$SLURM_SUBMIT_DIR"
 
 stage="${TM_STAGE:-}"
 case "$stage" in
-    ridft|eiger_pre|occupation_fix|integer_ridft|jobex|eiger_post|numforce|aoforce) ;;
+    ridft|ridft_eiger_fix|eiger_pre|occupation_fix|integer_ridft|eiger_fix_integer_ridft|jobex|jobex_eiger|eiger_post|numforce|aoforce) ;;
     *) echo "ERROR: unknown TM_STAGE='$stage'; use the chain submission script." >&2; exit 2 ;;
 esac
 
+active_stage="$stage"
 on_exit() {
     local rc=$?
     if (( rc != 0 )); then
-        python3 tm_workflow.py record "${stage^^}" FAILED "SLURM stage exited with code $rc; see slurm output" || true
-        echo "ERROR: ${stage} failed (exit $rc)" >&2
+        python3 tm_workflow.py record "${active_stage^^}" FAILED "SLURM stage exited with code $rc; see slurm output" || true
+        echo "ERROR: ${active_stage} failed (exit $rc)" >&2
     fi
 }
 trap on_exit EXIT
@@ -68,8 +69,35 @@ printf 'Stage: %s\nJob: %s\nNode: %s\nPartition: %s\nCPUs: %s\nOMP: %s\nPARNODES
     "$SLURM_JOB_PARTITION" "$SLURM_CPUS_PER_TASK" \
     "$OMP_NUM_THREADS" "$PARNODES" "$PWD" "$TURBOTMPDIR"
 
+# Preserve the original scientific stages while running quick checks/edits
+# inside the adjacent compute allocation. EIGER warnings stay non-blocking.
+run_eiger_pre() {
+    active_stage=eiger_pre
+    if ! eiger > eiger.out 2>&1; then
+        echo 'WARNING: eiger failed before geometry optimization; continuing' >&2
+    fi
+    python3 tm_workflow.py eiger eiger.out pre || true
+}
+
+run_occupation_fix() {
+    active_stage=occupation_fix
+    python3 tm_workflow.py remove-fermi
+}
+
+run_eiger_post() {
+    active_stage=eiger_post
+    if ! eiger > eiger.after_jobex.out 2>&1; then
+        echo 'WARNING: eiger failed after jobex; continuing' >&2
+    fi
+    python3 tm_workflow.py eiger eiger.after_jobex.out post || true
+    if [[ "${TM_FINAL_NO_HESSIAN:-0}" == 1 ]]; then
+        python3 tm_workflow.py record DONE SUCCESS 'Geometry optimization completed; Hessian intentionally skipped'
+    fi
+}
+
 case "$stage" in
-    ridft)
+    ridft|ridft_eiger_fix)
+        active_stage=ridft
         # The sole control file exists BEFORE define. No control.template,
         # no define.out and no rewriting control after define.
         [[ -f def.inp ]] || { echo 'ERROR: def.inp missing' >&2; exit 1; }
@@ -86,24 +114,26 @@ case "$stage" in
                 exit 1
             fi
         fi
+        if [[ "$stage" == ridft_eiger_fix ]]; then
+            run_eiger_pre
+            run_occupation_fix
+        fi
         ;;
 
     eiger_pre)
-        # An occupation warning or failed eiger does NOT stop geometry optimization.
-        if ! eiger > eiger.out 2>&1; then
-            echo 'WARNING: eiger failed before geometry optimization; continuing' >&2
-        fi
-        python3 tm_workflow.py eiger eiger.out pre || true
+        run_eiger_pre
         ;;
 
     occupation_fix)
-        # Quick input edit only: restore initial alpha/beta shell assignments,
-        # retain the previous workflow's removal of $fermi, and write control.
-        # No TURBOMOLE SCF is run in this short, 1-CPU, 1-GB allocation.
-        python3 tm_workflow.py remove-fermi
+        run_occupation_fix
         ;;
 
-    integer_ridft)
+    integer_ridft|eiger_fix_integer_ridft)
+        if [[ "$stage" == eiger_fix_integer_ridft ]]; then
+            run_eiger_pre
+            run_occupation_fix
+        fi
+        active_stage=integer_ridft
         # Run the same integer-occupation SCF as previously, now separately
         # on general so that it retains up to 48 hours and 20 CPUs.
         ridft > ridft.integer.out 2>&1
@@ -111,7 +141,8 @@ case "$stage" in
         python3 tm_workflow.py restore-occupations
         ;;
 
-    jobex)
+    jobex|jobex_eiger)
+        active_stage=jobex
         # Clear stale success markers only; preserve the actual molecular data.
         rm -f GEO_OPT_CONVERGED GEO_OPT_FAILED converged not.converged
         python3 tm_workflow.py record JOBEX RUNNING 'jobex -ri -gcart 4 -c 600'
@@ -125,16 +156,13 @@ case "$stage" in
         # package's GEO_OPT_CONVERGED marker. Normalize ONLY after success.
         [[ -f GEO_OPT_CONVERGED ]] || touch GEO_OPT_CONVERGED
         python3 tm_workflow.py record JOBEX OK 'geometry converged'
+        if [[ "$stage" == jobex_eiger ]]; then
+            run_eiger_post
+        fi
         ;;
 
     eiger_post)
-        if ! eiger > eiger.after_jobex.out 2>&1; then
-            echo 'WARNING: eiger failed after jobex; continuing' >&2
-        fi
-        python3 tm_workflow.py eiger eiger.after_jobex.out post || true
-        if [[ "${TM_FINAL_NO_HESSIAN:-0}" == 1 ]]; then
-            python3 tm_workflow.py record DONE SUCCESS 'Geometry optimization completed; Hessian intentionally skipped'
-        fi
+        run_eiger_post
         ;;
 
     numforce)
