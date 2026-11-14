@@ -67,6 +67,20 @@ The new `chain_plan.txt` records the original full 3- or 4-job stage plan; `chai
 
 **Important:** Previously submitted chains from the older tool do not have `chain_plan.txt`, so they are **not automatically resumable** by this new command. The original Hessian choice cannot safely be inferred from an incomplete record. A `.lan_submission_pending` marker means the tool may have been interrupted after SLURM accepted a job but before its ID was saved; inspect SLURM carefully before reconciliation, and do not blindly delete this marker or `chain_submission.tsv`. A `.lan_submission_lock` prevents concurrent submissions to the same metal; stale locks also require manual verification.
 
+## Monitoring calculations
+
+```bash
+lan-status               # one clear status per metal + workflow_status.csv
+lan-status --details     # also show SCF, geometry, frequency, and occupation history
+lan-status --base DIR    # check a different EF project directory
+```
+
+The summary separates **OVERALL**, **LAST STAGE**, **LIVE SLURM**, and **SLURM FINAL**. `OVERALL` is `COMPLETED` only when the current attempt has a recorded `DONE/SUCCESS` **and** all tracked SLURM jobs are verified as successfully completed. `RUNNING`/`PENDING` require live queue evidence; `FAILED` includes failed, cancelled, timed-out, and out-of-memory jobs (the exact cause remains visible under `SLURM FINAL` and in the CSV). `NEEDS_REVIEW` means the evidence is incomplete, inconsistent, or a submission is partial. `PREPARED` and `NOT_PREPARED` identify jobs that have not been submitted. `LAST STAGE` describes the current or last submitted computational stage; the combined JOBEX job also runs post-optimization EIGER.
+
+`LIVE SLURM` comes from `squeue`; `INACTIVE` means no tracked jobs were found in the live queue, **not** that they succeeded. Historical states come from a batched `sacct` query. The script does not claim success when accounting data, the expected working directory, or a current final workflow record cannot be verified. `INCOMPLETE` in the recorded workflow result means there is no final outcome recorded for this attempt; it does **not** claim the calculation is presently running. Legacy chains without an original `chain_plan.txt` may show `NEEDS_REVIEW` because their intended final stage is uncertain.
+
+The CSV retains detailed SCF, integer-SCF, geometry, frequency, and orbital-hole fields, plus `overall`, `last_stage`, `slurm_final`, and `status_note`. Detailed per-stage history can include earlier attempts; inspect the per-metal `workflow_history.jsonl` when investigating a recovery. The status command is read-only with respect to metal folders: it only updates the project-level `workflow_status.csv`. If `squeue`/`sacct` is unavailable or a job is too old for accounting retention, results may require manual review.
+
 ## When RIDFT needs manual intervention
 
 After the original failed/blocked jobs are stopped, edit e.g., `tb/control` manually. From the EF project directory:
