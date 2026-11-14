@@ -4,6 +4,7 @@ import argparse
 import csv
 from datetime import datetime, timezone
 import json
+from itertools import islice
 import os
 from pathlib import Path
 import subprocess
@@ -66,6 +67,50 @@ def hole_status(directory, stage):
     spinholes = len(data.get('holes_within_each_spin', []))
     fractional = len(data.get('fractional_occupations', []))
     return f'{status} (h={spinholes}, f={fractional})'
+
+
+def negative_frequency_count(directory, attempt, history, frequency_method):
+    """Count negative wave numbers among the first 8 vibspectrum mode rows.
+
+    Require a current recorded DONE/SUCCESS for the frequency attempt so an
+    old spectrum is not presented as a new unfinished/no-Hessian result.
+    TURBOMOLE's standard spectrum starts with three header lines.
+    """
+    if (frequency_method not in ('aoforce', 'numforce') or not attempt
+            or not final_event_for_attempt(history, attempt)):
+        return '-'
+    spectrum = directory / 'vibspectrum'
+    try:
+        # Refuse a spectrum older than the current submission attempt.
+        if spectrum.stat().st_mtime + 1 < attempt['path'].stat().st_mtime:
+            return '-'
+        with spectrum.open(errors='replace') as handle:
+            for _ in range(3):
+                if not handle.readline():
+                    return '-'
+            negatives = 0
+            modes = 0
+            for line in islice(handle, 8):
+                fields = line.split()
+                if not fields:
+                    continue
+                if not fields[0].isdigit():
+                    return '-'
+                # Symmetry is optional: "1 a -8.65" or "2 -0.00".
+                try:
+                    try:
+                        wave_number = float(fields[1].replace('D', 'E').replace('d', 'e'))
+                    except ValueError:
+                        wave_number = float(fields[2].replace('D', 'E').replace('d', 'e'))
+                except (IndexError, ValueError):
+                    return '-'
+                if not (float('-inf') < wave_number < float('inf')):
+                    return '-'
+                modes += 1
+                negatives += wave_number < 0  # -0.00 is zero, not negative.
+            return negatives if modes else '-'
+    except OSError:
+        return '-'
 
 
 def read_submission(path):
@@ -358,6 +403,7 @@ def main():
             active = next((r for r in running if r[2] in PENDING_STATES), None)
         frequency_method = next((s for s, _ in reversed(jobs)
                                  if s in ('numforce', 'aoforce')), '-')
+        negative_freqs = negative_frequency_count(directory, attempt, history, frequency_method)
         rows.append({
             'metal': metal, 'overall': overall, 'last_stage': last_stage,
             'unpaired': spin, 'jobid': jid, 'slurm': slurm,
@@ -370,6 +416,7 @@ def main():
                           else stage_status(history, 'AOFORCE') if frequency_method == 'aoforce'
                           else '-'),
             'frequency_method': frequency_method,
+            'negative_freqs': negative_freqs,
             'holes_pre': hole_status(directory, 'pre'),
             'holes_post': hole_status(directory, 'post'),
             'submitted_stages': len(jobs),
@@ -383,17 +430,18 @@ def main():
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
-    print(f'{"METAL":<6} {"OVERALL":<15} {"LAST STAGE":<13} {"LIVE SLURM":<14} {"SLURM FINAL":<13}')
+    print(f'{"METAL":<6} {"OVERALL":<15} {"LAST STAGE":<13} {"LIVE SLURM":<14} {"SLURM FINAL":<13} {"NEG FREQ":>8}')
     for row in rows:
         print(f'{row["metal"]:<6} {row["overall"]:<15} {row["last_stage"]:<13} '
-              f'{row["slurm"]:<14} {row["slurm_final"]:<13}')
+              f'{row["slurm"]:<14} {row["slurm_final"]:<13} {str(row["negative_freqs"]):>8}')
     if args.details:
         print(f'\n{"METAL":<6} {"STAGE":<15} {"RESULT":<12} {"SCF":<12} '
-              f'{"INT SCF":<12} {"GEO":<12} {"FREQ":<12} {"METHOD":<9} HOLES PRE / POST')
+              f'{"INT SCF":<12} {"GEO":<12} {"FREQ":<12} {"METHOD":<9} {"NEG":>3} HOLES PRE / POST')
         for row in rows:
             print(f'{row["metal"]:<6} {row["stage"]:<15} {row["result"]:<12} '
                   f'{row["scf"]:<12} {row["integer_scf"]:<12} {row["geometry"]:<12} {row["frequency"]:<12} '
-                  f'{row["frequency_method"]:<9} {row["holes_pre"]} / {row["holes_post"]}')
+                  f'{row["frequency_method"]:<9} {str(row["negative_freqs"]):>3} {row["holes_pre"]} / {row["holes_post"]}')
+        print('NEG counts strictly negative wave numbers in the first eight mode rows; -0.00 is zero.')
         print('Stage results without a current record show INCOMPLETE; per-stage history is retained.')
     needs_review = [row for row in rows if row['overall'] in ('FAILED', 'NEEDS_REVIEW')]
     if needs_review:
