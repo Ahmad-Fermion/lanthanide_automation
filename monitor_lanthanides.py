@@ -61,6 +61,8 @@ def hole_status(directory, stage):
     if not data:
         return '-'
     status = data.get('status', 'UNKNOWN')
+    if status == 'NO_HOLES_IN_PRINTED_WINDOW':
+        status = 'NO_HOLES_SHOWN'  # Display only; retain the full diagnostic in JSON.
     spinholes = len(data.get('holes_within_each_spin', []))
     fractional = len(data.get('fractional_occupations', []))
     return f'{status} (h={spinholes}, f={fractional})'
