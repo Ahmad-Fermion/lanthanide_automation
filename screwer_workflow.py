@@ -14,7 +14,6 @@ import shutil
 import subprocess
 import sys
 
-from setup_lanthanides import SPIN, make_define, read_charge
 
 METALS = ('la', 'ce', 'pr', 'nd', 'sm', 'eu', 'gd', 'tb', 'dy', 'ho', 'er', 'tm', 'yb', 'lu')
 STAGES = ('screwer_jobex_eiger',)
@@ -155,12 +154,12 @@ def prepare(base, metal, method, *, min_negative=0):
             raise RuntimeError(f'{base / file} required (user-authored template)')
     try:
         meta = json.loads((parent / 'metal.json').read_text())
-        generated_define = make_define((base / template_name).read_text(), metal, SPIN[metal])
-        screwer_charge = read_charge(generated_define)
+        # Screwer DEFINE only updates the displaced geometry.  Basis, charge,
+        # and orbital occupations come from the completed parent calculation;
+        # the continuation template intentionally has no EHT or b/u commands.
+        generated_define = (base / template_name).read_text()
     except (OSError, ValueError, KeyError) as error:
-        raise RuntimeError(f'{metal}: could not validate screwer DEFINE template: {error}') from error
-    if screwer_charge is None or screwer_charge != meta.get('charge'):
-        raise RuntimeError(f'{metal}: screwer DEFINE EHT charge {screwer_charge} does not match the original project charge {meta.get("charge")}; refusing')
+        raise RuntimeError(f'{metal}: could not read screwer DEFINE template: {error}') from error
     # Require that the requested correction uses the existing Hessian method.
     content = record.read_text().splitlines()
     recorded_methods = [line.split('\t')[0] for line in content[1:] if line.split('\t')[0] in ('numforce', 'aoforce')]
@@ -239,7 +238,7 @@ def prepare(base, metal, method, *, min_negative=0):
     inherited = tm_workflow.screwer_inheritance(child)
     info = {'workflow_version': 2, 'inherited_state': inherited,
             'parent': str(parent), 'metal': metal, 'mode': mode,
-            'define_source': template_name, 'charge': screwer_charge,
+            'define_source': template_name, 'charge': meta.get('charge'),
             'frequency_cm1': dict(negative)[mode], 'negative_modes_first8': negative,
             'method': method, 'prepared_utc': dt.datetime.now(dt.timezone.utc).isoformat(),
             'one_pass_only': True}

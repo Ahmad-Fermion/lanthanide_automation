@@ -132,11 +132,18 @@ shows separate rows for any correction directories that exist.
 Place your **own tested** `screwer.inp` (mode/displacement prompts) and
 `def_screwer.inp` (DEFINE menu responses for displaced coordinates) in each
 project root alongside the master `def.inp`. For **Gd**, additionally provide
-`def_screwer_gd.inp` containing its extra EHT answer, as with `def_gd.inp`.
-The templates are user-authored; the correction receives a **metal-specific
-copy** of the DEFINE input (matching the target Ln³⁺ spin and basis), with the
-original project EHT charge explicitly verified before copying. A missing,
-incompatible, or charge-mismatched screwer DEFINE template stops safely.
+`def_screwer_gd.inp` containing the Gd-specific continuation menu responses.
+The Screwer DEFINE template is copied **verbatim** (not modified using the
+initial setup's `b`/`u` basis and spin selectors), because the continuation
+inherits orbitals and shell occupations from the completed metal calculation.
+For Gd, `def_screwer_gd.inp` is selected and copied as `def_screwer.inp`.
+The Screwer template does **not** need `eht`, a charge, `b`, or `u` commands:
+those settings are inherited from the completed calculation's `control` and
+orbital files. The charge recorded in `screwer_prepared.json` comes from the
+original metal's `metal.json`, which was prepared using `def.inp` or
+`def_gd.inp`; it is **not** inferred from `def_screwer.inp`. After DEFINE,
+the existing checks verify that inherited orbitals and occupations remain unchanged
+and that `$fermi` has not been introduced.
 
 For a completed, verified Hessian calculation:
 
