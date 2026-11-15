@@ -77,25 +77,60 @@ def latest_submission(parent):
     return max(records, key=lambda p: p.stat().st_mtime_ns) if records else None
 
 
-def verify_parent(parent):
-    """Don't trigger on an unfinished run or a previous spectrum."""
+def verify_parent(parent, method):
+    """Check a completed Hessian calculation, with or without lan-run history.
+
+    Missing BOTH automation records and workflow status permits a conservative
+    manual-results check.  Partial/contradictory automation history is never
+    silently reclassified as a manual calculation.
+    """
     state = parent / 'workflow_status.json'
-    try:
-        data = json.loads(state.read_text())
-    except (FileNotFoundError, ValueError) as error:
-        raise RuntimeError(f'{parent}: no valid workflow_status.json') from error
-    if data.get('stage') != 'DONE' or data.get('status') != 'SUCCESS':
-        raise RuntimeError(f'{parent}: frequency job has not recorded DONE/SUCCESS')
     record = latest_submission(parent)
-    if record is None:
-        raise RuntimeError(f'{parent}: no tracked submission record')
-    fields = record.read_text().splitlines()
-    if not any(line.split('\t')[0] in ('numforce', 'aoforce') for line in fields[1:]):
-        raise RuntimeError(f'{parent}: latest submission did not request a Hessian')
-    spec = parent / 'vibspectrum'
-    if not spec.is_file() or spec.stat().st_mtime + 1 < record.stat().st_mtime:
-        raise RuntimeError(f'{parent}: missing/stale vibspectrum for current attempt')
-    # An active job in this calculation directory may still be mutating inputs.
+    automation_markers = ('workflow_status.json', 'workflow_history.jsonl',
+                          'chain_submission.tsv', 'chain_plan.txt')
+    has_history = record is not None or any((parent / name).exists()
+                                            for name in automation_markers)
+    if has_history:
+        try:
+            data = json.loads(state.read_text())
+        except (FileNotFoundError, ValueError) as error:
+            raise RuntimeError(f'{parent}: incomplete automation history; review manually') from error
+        if data.get('stage') != 'DONE' or data.get('status') != 'SUCCESS':
+            raise RuntimeError(f'{parent}: frequency job has not recorded DONE/SUCCESS')
+        if record is None:
+            raise RuntimeError(f'{parent}: no tracked submission record for automated result')
+        fields = record.read_text().splitlines()
+        recorded_methods = [line.split('\t')[0] for line in fields[1:]
+                            if line.split('\t')[0] in ('numforce', 'aoforce')]
+        if not recorded_methods or recorded_methods[-1] != method:
+            raise RuntimeError(f'{parent}: current Hessian is {recorded_methods[-1] if recorded_methods else "unknown"}, not {method}')
+        spec = parent / 'vibspectrum'
+        if not spec.is_file() or spec.stat().st_mtime + 1 < record.stat().st_mtime:
+            raise RuntimeError(f'{parent}: missing/stale vibspectrum for current attempt')
+        source = 'automation'
+    else:
+        # A manual calculation does not have a workflow_status.json or
+        # chain_submission.tsv. Verify tangible TURBOMOLE results instead.
+        if (parent / 'GEO_OPT_FAILED').exists() or (parent / 'not.converged').exists():
+            raise RuntimeError(f'{parent}: failure marker present; verify geometry optimization')
+        if not (parent / 'GEO_OPT_CONVERGED').is_file():
+            raise RuntimeError(f'{parent}: missing GEO_OPT_CONVERGED for manual calculation')
+        required = ('control', 'coord', 'basis', 'auxbasis', 'gradient',
+                    'jobex.out', 'hessian', 'vibspectrum',
+                    'aoforce.out' if method == 'aoforce' else 'numforce.out')
+        for name in required:
+            file = parent / name
+            if not file.is_file() or file.stat().st_size == 0:
+                raise RuntimeError(f'{parent}: missing/empty {name} for manual {method} calculation')
+        if not ((parent / 'alpha').is_file() and (parent / 'beta').is_file()) and not (parent / 'mos').is_file():
+            raise RuntimeError(f'{parent}: missing inherited alpha/beta or mos orbitals')
+        if (parent / 'vibspectrum').stat().st_mtime + 1 < (parent / 'jobex.out').stat().st_mtime:
+            raise RuntimeError(f'{parent}: vibspectrum predates latest JOBEX; review stale Hessian')
+        source = 'manual'
+
+    # Read and validate the same spectrum under both paths, before creating
+    # anything.  An active job may still be changing the source calculation.
+    spectrum_modes(parent / 'vibspectrum')
     if shutil.which('squeue') is None:
         raise RuntimeError('squeue unavailable: cannot rule out concurrent calculations')
     queue = execute(['squeue', '-h', '-u', os.environ.get('USER', ''), '-o', '%i|%Z'], cwd=parent)
@@ -106,7 +141,10 @@ def verify_parent(parent):
             row.partition('|')[0].strip() != current_gate)
            for row in queue.stdout.splitlines() if '|' in row):
         raise RuntimeError(f'{parent}: an active/pending job still uses this directory')
-    return record
+    if source == 'manual':
+        print(f'WARNING {parent.name}: no lan-run history; accepted manually completed '
+              f'{method} result using TURBOMOLE optimization and Hessian files', flush=True)
+    return source
 
 
 def parse_coordinates(output, parent_coord):
@@ -142,7 +180,7 @@ def prepare(base, metal, method, *, min_negative=0):
     parent = base / metal
     if not parent.is_dir():
         raise RuntimeError(f'{parent}: no metal directory')
-    record = verify_parent(parent)
+    parent_source = verify_parent(parent, method)
     modes = spectrum_modes(parent / 'vibspectrum')
     negative = [(n, freq) for n, freq in modes if freq < -min_negative]
     if not negative:
@@ -152,22 +190,29 @@ def prepare(base, metal, method, *, min_negative=0):
     for file in ('screwer.inp', template_name):
         if not (base / file).is_file() or not (base / file).stat().st_size:
             raise RuntimeError(f'{base / file} required (user-authored template)')
-    try:
-        meta = json.loads((parent / 'metal.json').read_text())
-        # Screwer DEFINE only updates the displaced geometry.  Basis, charge,
-        # and orbital occupations come from the completed parent calculation;
-        # the continuation template intentionally has no EHT or b/u commands.
-        generated_define = (base / template_name).read_text()
-    except (OSError, ValueError, KeyError) as error:
-        raise RuntimeError(f'{metal}: could not read screwer DEFINE template: {error}') from error
-    # Require that the requested correction uses the existing Hessian method.
-    content = record.read_text().splitlines()
-    recorded_methods = [line.split('\t')[0] for line in content[1:] if line.split('\t')[0] in ('numforce', 'aoforce')]
-    if not recorded_methods or recorded_methods[-1] != method:
-        raise RuntimeError(f'{metal}: current Hessian is {recorded_methods[-1] if recorded_methods else "unknown"}, not {method}')
+    # Screwer DEFINE only changes the displaced coordinates.  It does not
+    # establish EHT charge, basis, or orbital occupations again.
+    generated_define = (base / template_name).read_text()
+    metal_meta = parent / 'metal.json'
+    if metal_meta.is_file():
+        try:
+            meta = json.loads(metal_meta.read_text())
+        except ValueError as error:
+            raise RuntimeError(f'{metal_meta}: invalid metal metadata') from error
+        if not isinstance(meta, dict) or meta.get('metal') != metal:
+            raise RuntimeError(f'{metal_meta}: incorrect metal identity')
+    else:
+        # Metadata is for automation reporting, NOT an input to the Screwer
+        # calculation.  Do not guess the charge or spin of a manual project.
+        meta = {'metal': metal, 'charge': None, 'unpaired': None,
+                'source': 'manual TURBOMOLE control and orbitals'}
+        print(f'WARNING {metal}: no metal.json; child metadata will not infer '
+              'charge or spin from the Screwer DEFINE template', flush=True)
     child = correction_dir(parent, metal)
-    if child.exists() or legacy_dir(parent).exists():
-        raise RuntimeError(f'{parent}: screwer correction directory already exists; left untouched')
+    if child.exists():
+        raise RuntimeError(f'{child}: correction directory already exists; left untouched')
+    if legacy_dir(parent).exists():
+        print(f'NOTE {metal}: preserving existing legacy {legacy_dir(parent)}', flush=True)
     if not shutil.which('cpc') or not shutil.which('screwer') or not shutil.which('sdg') or not shutil.which('kdg'):
         raise RuntimeError('cpc, screwer, sdg and kdg must be in PATH (load turbomole/7.9)')
     print(f'{metal}: negative modes {negative}; creating {child}', flush=True)
@@ -183,9 +228,10 @@ def prepare(base, metal, method, *, min_negative=0):
     (child / 'def_screwer.inp').write_text(generated_define)
     # cpc copies TURBOMOLE data, not necessarily our custom metadata.
     # The correction retains the parent's Ln/charge/spin; never invent values.
-    if not (parent / 'metal.json').is_file():
-        raise RuntimeError(f'{parent}: missing metal.json')
-    shutil.copy2(parent / 'metal.json', child / 'metal.json')
+    if metal_meta.is_file():
+        shutil.copy2(metal_meta, child / 'metal.json')
+    else:
+        (child / 'metal.json').write_text(json.dumps(meta, indent=2) + '\n')
     script_dir = Path(__file__).resolve().parent
     for name in ('tm_workflow.py', 'turbo.pipeline.slurm',
                  'turbo.resume.slurm', 'screwer_workflow.py', 'setup_lanthanides.py'):
@@ -237,7 +283,7 @@ def prepare(base, metal, method, *, min_negative=0):
     import tm_workflow
     inherited = tm_workflow.screwer_inheritance(child)
     info = {'workflow_version': 2, 'inherited_state': inherited,
-            'parent': str(parent), 'metal': metal, 'mode': mode,
+            'parent': str(parent), 'parent_source': parent_source, 'metal': metal, 'mode': mode,
             'define_source': template_name, 'charge': meta.get('charge'),
             'frequency_cm1': dict(negative)[mode], 'negative_modes_first8': negative,
             'method': method, 'prepared_utc': dt.datetime.now(dt.timezone.utc).isoformat(),

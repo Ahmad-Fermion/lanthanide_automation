@@ -139,9 +139,11 @@ inherits orbitals and shell occupations from the completed metal calculation.
 For Gd, `def_screwer_gd.inp` is selected and copied as `def_screwer.inp`.
 The Screwer template does **not** need `eht`, a charge, `b`, or `u` commands:
 those settings are inherited from the completed calculation's `control` and
-orbital files. The charge recorded in `screwer_prepared.json` comes from the
-original metal's `metal.json`, which was prepared using `def.inp` or
-`def_gd.inp`; it is **not** inferred from `def_screwer.inp`. After DEFINE,
+orbital files. When available, the charge recorded in `screwer_prepared.json`
+comes from the original metal's `metal.json`, which was prepared using
+`def.inp` or `def_gd.inp`; it is **not** inferred from `def_screwer.inp`.
+For a manual parent without `metal.json`, the charge is recorded as unknown
+rather than guessed; the existing `control` is inherited. After DEFINE,
 the existing checks verify that inherited orbitals and occupations remain unchanged
 and that `$fermi` has not been introduced.
 
@@ -151,6 +153,27 @@ The check still compares the underlying orbital data and the inherited shell
 occupations, and verifies that `$fermi` is absent. Previously prepared Screwer
 folders with legacy byte-level hashes are checked against their untouched
 parent orbital files (no automatic overwrite or rerun).
+
+**Manually completed TURBOMOLE calculations:** `lan-screwer` also accepts a
+metal folder without `workflow_status.json`, `chain_submission.tsv`, or
+`metal.json` when the existing results independently demonstrate a converged
+JOBEX and a completed Hessian. It checks `GEO_OPT_CONVERGED`, nonempty
+`jobex.out`, `gradient`, `hessian`, `vibspectrum`, method-specific
+`aoforce.out` or `numforce.out`, `control`, `coord`, `basis`, `auxbasis`,
+existing `alpha`/`beta` or `mos`, and an inactive SLURM working directory.
+Incomplete or contradictory automation records are **not** treated as manual.
+The requested `ao`/`num` method must match the available frequency output.
+If no parent `metal.json` exists, only the correction child receives minimal
+metadata (`metal` plus unknown charge/spin); these values are **not** invented
+or used to reinitialize the electronic state. The original parent remains
+untouched. A pre-existing legacy `<metal>/screwer/` is left unchanged and
+**does not prevent** creating a separate `<metal>/screwer_<metal>/`.
+Use the project root for `--base`; if you are inside `gd/`, use `--base ..`.
+For example, from inside a manually completed `gd/` folder:
+
+```bash
+lan-screwer ao --base .. --metals gd --prepare-only
+```
 
 For a completed, verified Hessian calculation:
 
@@ -204,7 +227,7 @@ refuses to submit if the selected mode is not negative. It never invents a
 mode or displacement setting. Use **`lan-screwer ... --prepare-only` first**
 for an unfamiliar project or input template. An already existing
 `<metal>/screwer_<metal>/` is never overwritten. An existing legacy
-`<metal>/screwer/` is also protected from accidental replacement. If preparation fails after `cpc`,
+`<metal>/screwer/` is preserved and does not block the new folder. If preparation fails after `cpc`,
 inspect the directory manually rather than rerunning destructively.
 
 **Small imaginary frequencies:** A negative value such as -8.65 cm⁻¹ in
