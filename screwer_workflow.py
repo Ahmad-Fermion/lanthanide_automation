@@ -115,7 +115,7 @@ def parse_coordinates(output, parent_coord):
     rows = []
     for line in output.splitlines():
         fields = line.split()
-        if not fields:
+        if not fields or line.lstrip().startswith('#'):
             continue
         if len(fields) < 4:
             raise RuntimeError(f'newcoord has non-coordinate row: {line!r}')
