@@ -16,8 +16,12 @@ from setup_lanthanides import SPIN, make_control, make_coord, make_define, read_
 # setup_lanthanides.py creates precisely these files, before any calculations.
 PREPARED_FILES = {
     'control', 'coord', 'def.inp', 'metal.json', 'tm_workflow.py',
-    'turbo.pipeline.optimized.slurm', 'turbo.resume.slurm',
+    'turbo.pipeline.slurm', 'turbo.resume.slurm',
 }
+# New optional helpers may be present in freshly prepared folders; legacy
+# prepared folders remain valid for normal (non-screwer) submissions.
+OPTIONAL_PREPARED_FILES = {'screwer_workflow.py', 'turbo.screwer.slurm',
+                           'setup_lanthanides.py'}
 
 
 class UnsafeSubmission(Exception):
@@ -35,7 +39,7 @@ def verify_prepared(base: Path, metal: str, check_queue: bool = False):
         raise UnsafeSubmission('not a real prepared metal directory')
     children = {item.name for item in directory.iterdir()}
     # lan-run holds this temporary directory lock while doing the verification.
-    unexpected = sorted(children - PREPARED_FILES - {'.lan_submission_lock'})
+    unexpected = sorted(children - PREPARED_FILES - OPTIONAL_PREPARED_FILES - {'.lan_submission_lock'})
     missing = sorted(PREPARED_FILES - children)
     if unexpected or missing:
         raise UnsafeSubmission(
@@ -43,7 +47,7 @@ def verify_prepared(base: Path, metal: str, check_queue: bool = False):
             f'missing files: {missing or "none"}). '
             'Existing calculation outputs or unrecognized files require manual review.'
         )
-    for name in PREPARED_FILES:
+    for name in PREPARED_FILES | (children & OPTIONAL_PREPARED_FILES):
         p = directory / name
         if p.is_symlink() or not p.is_file():
             raise UnsafeSubmission(f'{name} must be a regular file, not a symlink or directory')

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """TURBOMOLE helper: validate DEFINE output, check SCF, inspect eiger, track stage."""
 import argparse
+import hashlib
 import datetime as dt
 import json
 import os
@@ -126,6 +127,55 @@ def restore_after_integer_scf():
     record('INTEGER_SCF', 'OK',
            'initial integer alpha/beta shells restored after ridft' if changed
            else 'initial integer alpha/beta shells confirmed after ridft')
+
+
+def screwer_inheritance(directory):
+    """Fingerprint parent MOs and shell groups; Screwer must reuse this state.
+
+    This is recorded *after* generating the displaced coord, before DEFINE.
+    It does not guarantee electronic-state correctness, only continuity.
+    """
+    orb_files = ['alpha', 'beta'] if all((directory / f).is_file() for f in ('alpha', 'beta')) else (
+        ['mos'] if (directory / 'mos').is_file() else [])
+    if not orb_files:
+        raise RuntimeError(f'{directory}: inherited alpha/beta or mos orbital files missing; refusing screwer continuation')
+    orbitals = {}
+    for name in orb_files:
+        checksum = hashlib.sha256()
+        with (directory / name).open('rb') as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b''):
+                checksum.update(block)
+        orbitals[name] = checksum.hexdigest()
+    control = (directory / 'control').read_text()
+    # Find whole shell blocks with explicit data-group boundaries.
+    pattern = re.compile(r'(?ims)^[ \t]*\$(?:alpha|beta|closed)\s+shells\b.*?(?=^[ \t]*\$|\Z)')
+    shells = sorted(m.group(0).strip() for m in pattern.finditer(control))
+    if not shells:
+        raise RuntimeError(f'{directory}: missing inherited shell occupations')
+    if re.search(r'(?im)^[ \t]*\$fermi\b', control):
+        raise RuntimeError(f'{directory}: $fermi unexpectedly present; inspect before screwer continuation')
+    return {'orbitals_sha256': orbitals, 'shell_groups': shells}
+
+
+def check_screwer_define():
+    """Validate DEFINE without resetting the inherited SCF electronic state."""
+    manifest = HERE / 'screwer_prepared.json'
+    if not manifest.is_file():
+        raise RuntimeError('missing screwer_prepared.json')
+    info = json.loads(manifest.read_text())
+    if info.get('workflow_version') != 2:
+        raise RuntimeError('outdated screwer manifest; refusing incompatible restart')
+    if (HERE / 'control.template').exists():
+        raise RuntimeError('unexpected control.template in screwer continuation')
+    for name in ('control', 'basis', 'auxbasis'):
+        if not (HERE / name).is_file():
+            raise RuntimeError(f'screwer DEFINE missing {name}')
+    expected = info.get('inherited_state')
+    current = screwer_inheritance(HERE)
+    if not expected or current != expected:
+        raise RuntimeError('DEFINE changed inherited orbital files or shell occupations; stop and inspect def_screwer.inp')
+    (HERE / 'define_setup.ok').write_text(now() + '\n')
+    record('DEFINE', 'OK', 'screwer DEFINE verified; inherited orbitals and occupations unchanged; no Fermi smearing')
 
 
 def check_define():
@@ -264,6 +314,7 @@ def main():
     )
     sub = ap.add_subparsers(dest='command', required=True, help='stage helper action')
     sub.add_parser('check-define', help='verify files and $fermi nue after define without rewriting control')
+    sub.add_parser('check-screwer-define', help='verify continuation DEFINE kept inherited orbitals, occupations, and no $fermi')
     sub.add_parser('remove-fermi', help='save control.with_fermi, restore define occupations and remove $fermi before integer SCF')
     sub.add_parser('restore-occupations', help='restore define occupations after integer SCF if changed (before jobex)')
     r = sub.add_parser('check-ridft', help='verify SCF convergence signatures in an output file'); r.add_argument('filename', help='ridft output file to check')
@@ -274,6 +325,7 @@ def main():
     args = ap.parse_args()
     try:
         if args.command == 'check-define': check_define()
+        elif args.command == 'check-screwer-define': check_screwer_define()
         elif args.command == 'remove-fermi': remove_fermi()
         elif args.command == 'restore-occupations': restore_after_integer_scf()
         elif args.command == 'check-ridft': return check_ridft(args.filename)

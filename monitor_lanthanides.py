@@ -208,7 +208,8 @@ def stage_label(stage):
         'ridft-recovery': 'RIDFT', 'eiger_pre': 'EIGER',
         'occupation_fix': 'OCCUPATIONS', 'integer_ridft': 'INTEGER_SCF',
         'eiger_fix_integer_ridft': 'INTEGER_SCF',
-        'jobex_eiger': 'JOBEX', 'jobex': 'JOBEX', 'eiger_post': 'EIGER',
+        'jobex_eiger': 'JOBEX', 'screwer_jobex_eiger': 'JOBEX',
+        'jobex': 'JOBEX', 'eiger_post': 'EIGER',
         'numforce': 'FREQ', 'aoforce': 'FREQ',
     }.get(stage, stage.upper() if stage else '-')
 
@@ -361,24 +362,32 @@ def main():
     args = parser.parse_args()
     base = args.base.resolve()
 
+    targets = []
+    for metal, spin in SPIN.items():
+        parent = base / metal
+        targets.append((metal, parent, spin))
+        # Only display correction calculations when a corresponding folder
+        # exists. Keep supporting the initial `screwer/` release for monitoring.
+        for child in (parent / f'screwer_{metal}', parent / 'screwer'):
+            if child.exists():
+                targets.append((f'{metal}/{child.name}', child, spin))
+
     attempts = {}
-    for metal in SPIN:
-        directory = base / metal
+    for label, directory, _ in targets:
         path = latest_attempt(directory) if directory.is_dir() else None
         if path:
             jobs, error = read_submission(path)
-            attempts[metal] = {'path': path, 'jobs': jobs, 'error': error}
+            attempts[label] = {'path': path, 'jobs': jobs, 'error': error}
         else:
-            attempts[metal] = None
+            attempts[label] = None
     queue, queue_error, accounting, accounting_error = scheduler_snapshot(attempts)
 
     rows = []
-    for metal, spin in SPIN.items():
-        directory = base / metal
+    for label, directory, spin in targets:
         prepared = (directory / 'metal.json').is_file()
         history = read_history(directory / 'workflow_history.jsonl')
         state = read_json(directory / 'workflow_status.json')
-        attempt = attempts[metal]
+        attempt = attempts[label]
         jobs = attempt['jobs'] if attempt else []
         overall, last_stage, slurm, slurm_final, jid, reason = classify(
             directory, prepared, attempt, history, state, queue, queue_error,
@@ -405,7 +414,7 @@ def main():
                                  if s in ('numforce', 'aoforce')), '-')
         negative_freqs = negative_frequency_count(directory, attempt, history, frequency_method)
         rows.append({
-            'metal': metal, 'overall': overall, 'last_stage': last_stage,
+            'metal': label, 'overall': overall, 'last_stage': last_stage,
             'unpaired': spin, 'jobid': jid, 'slurm': slurm,
             'slurm_final': slurm_final, 'stage': stage,
             'result': result,
@@ -430,15 +439,16 @@ def main():
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
-    print(f'{"METAL":<6} {"OVERALL":<15} {"LAST STAGE":<13} {"LIVE SLURM":<14} {"SLURM FINAL":<13} {"NEG FREQ":>8}')
+    metal_width = max(6, *(len(row['metal']) for row in rows))
+    print(f'{"METAL":<{metal_width}} {"OVERALL":<15} {"LAST STAGE":<13} {"LIVE SLURM":<14} {"SLURM FINAL":<13} {"NEG FREQ":>8}')
     for row in rows:
-        print(f'{row["metal"]:<6} {row["overall"]:<15} {row["last_stage"]:<13} '
+        print(f'{row["metal"]:<{metal_width}} {row["overall"]:<15} {row["last_stage"]:<13} '
               f'{row["slurm"]:<14} {row["slurm_final"]:<13} {str(row["negative_freqs"]):>8}')
     if args.details:
-        print(f'\n{"METAL":<6} {"STAGE":<15} {"RESULT":<12} {"SCF":<12} '
+        print(f'\n{"METAL":<{metal_width}} {"STAGE":<15} {"RESULT":<12} {"SCF":<12} '
               f'{"INT SCF":<12} {"GEO":<12} {"FREQ":<12} {"METHOD":<9} {"NEG":>3} HOLES PRE / POST')
         for row in rows:
-            print(f'{row["metal"]:<6} {row["stage"]:<15} {row["result"]:<12} '
+            print(f'{row["metal"]:<{metal_width}} {row["stage"]:<15} {row["result"]:<12} '
                   f'{row["scf"]:<12} {row["integer_scf"]:<12} {row["geometry"]:<12} {row["frequency"]:<12} '
                   f'{row["frequency_method"]:<9} {str(row["negative_freqs"]):>3} {row["holes_pre"]} / {row["holes_post"]}')
         print('NEG counts strictly negative wave numbers in the first eight mode rows; -0.00 is zero.')

@@ -1,6 +1,6 @@
 #!/bin/bash
 # VACC/TURBOMOLE 7.9: group lightweight stages into compute allocations.
-# Do not sbatch this file directly: submit-turbo-chain.optimized.sh supplies
+# Do not sbatch this file directly: submit-turbo-chain.sh supplies
 # TM_STAGE and creates the afterok dependency chain.
 #SBATCH --job-name=tm-stage
 #SBATCH --account=pi-crreinha
@@ -48,7 +48,7 @@ cd "$SLURM_SUBMIT_DIR"
 
 stage="${TM_STAGE:-}"
 case "$stage" in
-    ridft|ridft_eiger_fix|eiger_pre|occupation_fix|integer_ridft|eiger_fix_integer_ridft|jobex|jobex_eiger|eiger_post|numforce|aoforce) ;;
+    ridft|ridft_eiger_fix|eiger_pre|occupation_fix|integer_ridft|eiger_fix_integer_ridft|jobex|jobex_eiger|screwer_jobex_eiger|eiger_post|numforce|aoforce) ;;
     *) echo "ERROR: unknown TM_STAGE='$stage'; use the chain submission script." >&2; exit 2 ;;
 esac
 
@@ -100,9 +100,14 @@ case "$stage" in
         active_stage=ridft
         # The sole control file exists BEFORE define. No control.template,
         # no define.out and no rewriting control after define.
-        [[ -f def.inp ]] || { echo 'ERROR: def.inp missing' >&2; exit 1; }
-        python3 tm_workflow.py record DEFINE RUNNING 'define < def.inp'
-        define < def.inp
+        define_input='def.inp'
+        if [[ "${TM_SCREWER_CHILD:-0}" == 1 ]]; then
+            [[ -f screwer_prepared.json ]] || { echo 'ERROR: screwer child manifest missing' >&2; exit 1; }
+            define_input='def_screwer.inp'
+        fi
+        [[ -f "$define_input" ]] || { echo "ERROR: $define_input missing" >&2; exit 1; }
+        python3 tm_workflow.py record DEFINE RUNNING "define < $define_input"
+        define < "$define_input"
         python3 tm_workflow.py check-define
 
         actual -r
@@ -141,6 +146,27 @@ case "$stage" in
         python3 tm_workflow.py restore-occupations
         ;;
 
+    screwer_jobex_eiger)
+        # Screwer continues with the converged parent orbitals: no Fermi
+        # smearing, pre-JOBEX EIGER or occupation reset. Run one fresh SCF
+        # for the displaced geometry before optimizing it.
+        [[ "${TM_SCREWER_CHILD:-0}" == 1 && -f screwer_prepared.json && -f def_screwer.inp ]] || {
+            echo 'ERROR: screwer continuation requires its manifest and def_screwer.inp' >&2
+            exit 2
+        }
+        active_stage=define_screwer
+        python3 tm_workflow.py record DEFINE RUNNING 'define < def_screwer.inp (screwer continuation)'
+        define < def_screwer.inp
+        python3 tm_workflow.py check-screwer-define
+        active_stage=ridft
+        actual -r
+        python3 tm_workflow.py record RIDFT RUNNING 'screwer continuation SCF before JOBEX'
+        ridft > ridft.out 2>&1
+        python3 tm_workflow.py check-ridft ridft.out
+        # Fall through to the same JOBEX + EIGER implementation; RIDFT
+        # shares the first SLURM allocation rather than requesting another.
+        ;&
+
     jobex|jobex_eiger)
         active_stage=jobex
         # Clear stale success markers only; preserve the actual molecular data.
@@ -156,7 +182,7 @@ case "$stage" in
         # package's GEO_OPT_CONVERGED marker. Normalize ONLY after success.
         [[ -f GEO_OPT_CONVERGED ]] || touch GEO_OPT_CONVERGED
         python3 tm_workflow.py record JOBEX OK 'geometry converged'
-        if [[ "$stage" == jobex_eiger ]]; then
+        if [[ "$stage" == jobex_eiger || "$stage" == screwer_jobex_eiger ]]; then
             run_eiger_post
         fi
         ;;
@@ -170,11 +196,17 @@ case "$stage" in
             echo 'ERROR: successful optimization marker or gradient missing.' >&2
             exit 2
         }
+        if [[ "${TM_SCREWER_CHILD:-0}" == 1 ]]; then
+            python3 screwer_workflow.py --clean-frequency --base "$(dirname "$(dirname "$PWD")")" --metals "$(basename "$(dirname "$PWD")")"
+        fi
         python3 tm_workflow.py record NUMFORCE RUNNING 'PARNODES=1 NumForce -ri -central'
         # VERIFIED: exactly one displacement worker, OpenMP threads from allocation.
         PARNODES=1 NumForce -ri -central > numforce.out 2>&1
         python3 tm_workflow.py check-numforce
         python3 tm_workflow.py record DONE SUCCESS 'NumForce completed; see occupation warnings'
+        if [[ "${TM_SCREWER_CHILD:-0}" == 1 ]]; then
+            python3 screwer_workflow.py --export-only --base "$(dirname "$(dirname "$PWD")")" --metals "$(basename "$(dirname "$PWD")")"
+        fi
         ;;
 
     aoforce)
@@ -182,10 +214,16 @@ case "$stage" in
             echo 'ERROR: successful optimization marker missing.' >&2
             exit 2
         }
+        if [[ "${TM_SCREWER_CHILD:-0}" == 1 ]]; then
+            python3 screwer_workflow.py --clean-frequency --base "$(dirname "$(dirname "$PWD")")" --metals "$(basename "$(dirname "$PWD")")"
+        fi
         python3 tm_workflow.py record AOFORCE RUNNING 'aoforce'
         aoforce > aoforce.out 2>&1
         python3 tm_workflow.py check-aoforce
         python3 tm_workflow.py record DONE SUCCESS 'aoforce completed; see occupation warnings'
+        if [[ "${TM_SCREWER_CHILD:-0}" == 1 ]]; then
+            python3 screwer_workflow.py --export-only --base "$(dirname "$(dirname "$PWD")")" --metals "$(basename "$(dirname "$PWD")")"
+        fi
         ;;
 esac
 

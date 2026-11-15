@@ -96,8 +96,12 @@ def setup_one(base, metal):
         (dest / 'def.inp').write_text(define_text)
         charge = read_charge(define_text)
         (dest / 'control').write_text(make_control((base / 'control').read_text(), SPIN[metal]))
-        shutil.copy2(ROOT / 'turbo.pipeline.optimized.slurm', dest / 'turbo.pipeline.optimized.slurm')
+        shutil.copy2(ROOT / 'turbo.pipeline.slurm', dest / 'turbo.pipeline.slurm')
         shutil.copy2(ROOT / 'turbo.resume.slurm', dest / 'turbo.resume.slurm')
+        shutil.copy2(ROOT / 'turbo.screwer.slurm', dest / 'turbo.screwer.slurm')
+        # The in-folder screwer gate imports make_define/SPIN from this helper.
+        shutil.copy2(ROOT / 'setup_lanthanides.py', dest / 'setup_lanthanides.py')
+        shutil.copy2(ROOT / 'screwer_workflow.py', dest / 'screwer_workflow.py')
         shutil.copy2(ROOT / 'tm_workflow.py', dest / 'tm_workflow.py')
         (dest / 'metal.json').write_text(json.dumps({'metal': metal, 'unpaired': SPIN[metal],
                                                      'charge': charge}, indent=2) + '\n')

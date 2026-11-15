@@ -59,7 +59,7 @@ esac
 base="$(cd -- "$base" && pwd -P)"
 dir="$base/$metal"
 [[ -d "$dir" ]] || { echo "ERROR: $dir is missing" >&2; exit 1; }
-for name in control coord metal.json tm_workflow.py turbo.pipeline.optimized.slurm; do
+for name in control coord metal.json tm_workflow.py turbo.pipeline.slurm; do
     [[ -f "$dir/$name" ]] || { echo "ERROR: missing $dir/$name" >&2; exit 1; }
 done
 if [[ "$mode" != continue-only ]]; then
@@ -75,10 +75,10 @@ if [[ "$mode" == continue-only ]]; then
     }
 fi
 if [[ "$mode" != ridft-only ]]; then
-    if ! grep -Fq 'eiger_fix_integer_ridft' "$dir/turbo.pipeline.optimized.slurm" ||
-       ! grep -Fq 'jobex_eiger' "$dir/turbo.pipeline.optimized.slurm"; then
+    if ! grep -Fq 'eiger_fix_integer_ridft' "$dir/turbo.pipeline.slurm" ||
+       ! grep -Fq 'jobex_eiger' "$dir/turbo.pipeline.slurm"; then
         echo 'ERROR: per-metal SLURM script does not support consolidated recovery stages.' >&2
-        echo 'Review and manually update the metal/turbo.pipeline.optimized.slurm before submitting recovery.' >&2
+        echo 'Review and manually update the metal/turbo.pipeline.slurm before submitting recovery.' >&2
         exit 1
     fi
     [[ -s "$dir/initial_occupations" ]] || {
@@ -117,7 +117,7 @@ submit_one() {
     local raw jid
     local args=(--parsable --job-name="tm-${metal}-${stage}" --partition="$partition"
                 --time="$time" --mem="$mem" --cpus-per-task="$cpus")
-    if [[ "$script" == 'turbo.pipeline.optimized.slurm' ]]; then
+    if [[ "$script" == 'turbo.pipeline.slurm' ]]; then
         local export_spec="ALL,TM_STAGE=$stage"
         if [[ "$frequency" == none && "$stage" == jobex_eiger ]]; then
             export_spec+=",TM_FINAL_NO_HESSIAN=1"
@@ -148,7 +148,7 @@ if [[ "$mode" != 'ridft-only' ]]; then
             jobex_eiger) time='2-00:00:00'; mem="$JOBEX_MEM"; cpus="$TM_CPUS" ;;
             numforce|aoforce) time='2-00:00:00'; mem="$HESS_MEM"; cpus="$TM_CPUS" ;;
         esac
-        submit_one "$stage" turbo.pipeline.optimized.slurm "$partition" "$time" "$mem" "$cpus"
+        submit_one "$stage" turbo.pipeline.slurm "$partition" "$time" "$mem" "$cpus"
     done
 fi
 printf 'Submitted %s recovery for %s; see %s\n' "$mode" "$metal" "$record"

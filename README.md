@@ -25,6 +25,10 @@ git pull --ff-only
 bash install.sh
 ```
 
+**Script filenames:** The central submission launcher is `submit-turbo-chain.sh`, and the calculation-stage batch script is `turbo.pipeline.slurm`. The recovery and Screwer scripts remain `submit-turbo-recovery.sh`, `turbo.resume.slurm`, and `turbo.screwer.slurm`.
+
+**Existing metal directories:** Previously prepared metal directories contain their own copied batch scripts. Renaming the central scripts does **not** update those copies. Do not rename or replace an in-use batch script while jobs are pending or running; first inspect outstanding jobs, then manually migrate the per-metal script when safe. Existing metal directories are never changed automatically.
+
 **Requirements:** VACC account, Python 3, TURBOMOLE 7.9, and SLURM. 
 
 ## Four commands to remember
@@ -72,6 +76,7 @@ The new `chain_plan.txt` records the original full 3- or 4-job stage plan; `chai
 ```bash
 lan-status               # one clear status per metal + workflow_status.csv
 lan-status --details     # also show SCF, geometry, frequency, and occupation history
+                           # separate screwer_<metal> rows appear when present
 lan-status --base DIR    # check a different EF project directory
 ```
 
@@ -118,3 +123,110 @@ After `define`, the initial integer alpha/beta shell assignments are saved in `i
 **Requirements:** Python 3, SLURM, TURBOMOLE 7.9 on VACC. For new `gd/`, provide `def_gd.inp` in the project root. Defaults: 20 CPUs/20 GB for RIDFT/JOBEX, 100 GB for frequency; overrides via `TM_CPUS`, `RIDFT_MEM`, `JOBEX_MEM`, `HESS_MEM`, `EIGER_CPUS`, `EIGER_MEM` (legacy standalone-stage settings; not used by consolidated submissions).
 
 **Help:** `lan-run --help`, `lan-recover --help`, `lan-setup --help`, `lan-status --help`. The per-metal files (including `chain_submission.tsv`, `initial_occupations`, stage logs and warnings) remain in that EF project. Verify orbitals/occupations and frequencies scientifically.
+
+## Optional imaginary-frequency correction (`lan-screwer`)
+
+This is an **opt-in, one-pass** screwer workflow. It does not change existing
+`lan-run` or `lan-recover` behavior unless selected. `lan-status` also
+shows separate rows for any correction directories that exist.
+Place your **own tested** `screwer.inp` (mode/displacement prompts) and
+`def_screwer.inp` (DEFINE menu responses for displaced coordinates) in each
+project root alongside the master `def.inp`. For **Gd**, additionally provide
+`def_screwer_gd.inp` containing its extra EHT answer, as with `def_gd.inp`.
+The templates are user-authored; the correction receives a **metal-specific
+copy** of the DEFINE input (matching the target Ln³⁺ spin and basis), with the
+original project EHT charge explicitly verified before copying. A missing,
+incompatible, or charge-mismatched screwer DEFINE template stops safely.
+
+For a completed, verified Hessian calculation:
+
+```bash
+lan-screwer num --metals gd --prepare-only  # inspect displaced inputs before submitting
+lan-screwer num --metals gd --submit-prepared # submit one correction chain after inspection
+# Or in one step when confident and no screwer_<metal>/ directory exists:
+lan-screwer num --metals gd
+lan-screwer ao --metals ce
+```
+
+For *future* calculations, opt in when you submit:
+
+```bash
+lan-run num --metals gd --screwer
+lan-run ao --metals sm --screwer
+```
+
+`--screwer` requires `num` or `ao` (there is no spectrum for bare
+`lan-run`). It adds **one** dependent `short` gate job (1 CPU, 1 GB, 10 minutes)
+after the fourth Hessian job. Once the Hessian has recorded DONE/SUCCESS, the
+gate checks the first eight mode rows of `vibspectrum`. If none is strictly
+negative, it does nothing. If a negative mode exists, it runs `cpc screwer_<metal>`,
+copies the screwer input and a validated metal-specific DEFINE template to
+the **new** `<metal>/screwer_<metal>/` folder,
+runs `screwer < screwer.inp`, checks that `$newcoord` describes a genuinely
+negative mode, generates `$coord` using `sdg -b newcoord`, then invokes
+`kdg newcoord`, `kdg coord`, `kdg symmetry`, `kdg optimize` in that order.
+It prepares `screwer_prepared.json` and submits a **separate two-job**
+correction chain: **(1) `define < def_screwer.inp` → `actual -r` →
+RIDFT → JOBEX → EIGER; (2) AOFORCE or NumForce**. The single pre-JOBEX
+RIDFT runs on the displaced structure, with no separate SLURM allocation
+or automatic SCF retry; convergence is checked before JOBEX. JOBEX also
+performs its own RI-DFT SCF/gradient cycles as required. The original
+Fermi-smearing initialization, pre-JOBEX EIGER, occupation restoration,
+and integer-RIDFT stages are deliberately **not** repeated.
+
+Unlike the normal initial DEFINE check, the screwer DEFINE validator requires
+**no `$fermi`** and verifies that the inherited MO files (`alpha`/`beta`,
+or `mos`) and shell occupation groups have not changed. If DEFINE changes
+these, the job **stops for manual inspection**; the software does not reset
+occupations or silently replace the electronic state. This is a continuity
+check, not independent validation of the physical electronic state.
+The scientific correction runs **only once**; no
+recursive automatic re-distortion is scheduled, even if the new Hessian has
+remaining imaginary frequencies.
+
+The supplied `screwer.inp` determines which mode is displaced and the
+step/temperature. This program verifies the produced `$newcoord` comment and
+refuses to submit if the selected mode is not negative. It never invents a
+mode or displacement setting. Use **`lan-screwer ... --prepare-only` first**
+for an unfamiliar project or input template. An already existing
+`<metal>/screwer_<metal>/` is never overwritten. An existing legacy
+`<metal>/screwer/` is also protected from accidental replacement. If preparation fails after `cpc`,
+inspect the directory manually rather than rerunning destructively.
+
+**Small imaginary frequencies:** A negative value such as -8.65 cm⁻¹ in
+one of the first six modes can be a numerical translation/rotation rather
+than a chemically meaningful unstable coordinate. The default is to trigger
+on *strictly negative* values as requested, but for an existing completed job
+you can choose `--min-imag 20` to require a mode below -20 cm⁻¹:
+
+```bash
+lan-screwer num --metals gd --min-imag 20 --prepare-only
+```
+
+The original completed metal folder is never edited by screwer preparation.
+Old copied status/scheduler files in the newly created child are archived
+under `screwer_<metal>/parent_results/` (including old initial occupations
+and Fermi-era control backups); inherited frequency files are archived
+before the new Hessian. The child Hessian step attempts to extract unavailable
+`$noproj` data groups with `sdg` to `nprhessian`, `nprvibspectrum`,
+`npr_vib_normal_modes` without overwriting existing nonempty files. You can
+repeat just this cheap extraction on the login node with:
+
+```bash
+lan-screwer --export-only --metals gd
+```
+
+Caveats: `def_screwer.inp` / `def_screwer_gd.inp` must preserve the inherited
+MO files and occupations and must **not reintroduce `$fermi`**. The child
+stages are separate jobs with their own chain records, not the original
+parent's history. `lan-status` and `lan-status --details` include an
+additional `<metal>/screwer_<metal>` row whenever that folder exists, with
+independent SLURM, frequency and negative-mode results; historical
+`<metal>/screwer` directories are also recognized for monitoring.
+Review `<metal>/screwer_<metal>/chain_submission.tsv` and `screwer.out`
+separately. An old four-job screwer preparation cannot be submitted under
+the new two-job stage plan without manual review. Likewise, a previously
+prepared child containing an older SLURM script without the pre-JOBEX RIDFT
+is rejected; inspect and update its copied script manually if appropriate.
+SLURM submissions launched from the short gate job and actual TURBOMOLE
+`screwer`/`sdg`/`kdg`/DEFINE behavior require a controlled **VACC validation**.

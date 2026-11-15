@@ -18,6 +18,9 @@ Options:
   --prepare-only      Prepare folders; submit nothing
   --include-existing  Submit pristine, never-run folders from lan-setup
   --resume-partial    Resume an interrupted chain without repeating submitted jobs
+  --screwer           After a completed Hessian, check for negative modes and run
+                      one screwer reoptimization using master screwer.inp and
+                      def_screwer.inp. Requires num or ao; adds one short gate job.
                       (requires --metals and matching original Hessian selection)
   --base DIR          Master project directory (default: current directory)
   -h, --help          Show help
@@ -26,6 +29,7 @@ Examples:
   lan-run num --metals sm --prepare-only  # prepare Sm for inspection
   lan-run num --metals sm --include-existing  # submit pristine, prepared Sm
   lan-run num --metals sm --resume-partial    # resume missing submissions only
+  lan-run num --metals gd --screwer           # one opt-in screwer pass after Hessian
   lan-run                                 # create/submit missing metals, no Hessian
   lan-run ao                              # create/submit missing metals, aoforce
   lan-run num --metals gd tb              # two metals, NumForce
@@ -46,6 +50,7 @@ frequency='none'
 prepare_only=0
 include_existing=0
 resume_partial=0
+screwer_auto=0
 metals=(la ce pr nd sm eu gd tb dy ho er tm yb lu)
 selected_metals=()
 
@@ -69,10 +74,28 @@ while (($#)); do
         --prepare-only) prepare_only=1; shift ;;
         --include-existing) include_existing=1; shift ;;
         --resume-partial) resume_partial=1; shift ;;
+        --screwer) screwer_auto=1; shift ;;
         *) echo "ERROR: unknown option '$1'" >&2; usage >&2; exit 2 ;;
     esac
 done
 
+if ((screwer_auto)); then
+    [[ "$frequency" != none ]] || { echo 'ERROR: --screwer requires ao or num (a Hessian calculation)' >&2; exit 2; }
+    (( ! prepare_only )) || { echo 'ERROR: --screwer cannot be combined with --prepare-only' >&2; exit 2; }
+    for template in screwer.inp def_screwer.inp; do
+        [[ -s "$base/$template" ]] || { echo "ERROR: --screwer requires project template $base/$template" >&2; exit 2; }
+    done
+    # The Gd EHT menu needs the same extra answer as in def_gd.inp.
+    if (( ${#selected_metals[@]} == 0 )); then
+        [[ -s "$base/def_screwer_gd.inp" ]] || { echo 'ERROR: --screwer for all metals requires def_screwer_gd.inp' >&2; exit 2; }
+    else
+        for selected in "${selected_metals[@]}"; do
+            if [[ "$selected" == gd && ! -s "$base/def_screwer_gd.inp" ]]; then
+                echo 'ERROR: Gd --screwer requires the Gd-specific def_screwer_gd.inp' >&2; exit 2
+            fi
+        done
+    fi
+fi
 if ((resume_partial)); then
     (( ! include_existing && ! prepare_only )) || {
         echo 'ERROR: --resume-partial cannot be combined with --include-existing or --prepare-only' >&2; exit 2;
@@ -95,7 +118,7 @@ if (( ! resume_partial )); then
         [[ -f "$base/$input" ]] || { echo "ERROR: master $input missing in $base" >&2; exit 1; }
     done
 fi
-for helper in setup_lanthanides.py submission_guard.py tm_workflow.py turbo.pipeline.optimized.slurm; do
+for helper in setup_lanthanides.py submission_guard.py tm_workflow.py turbo.pipeline.slurm screwer_workflow.py turbo.screwer.slurm; do
     [[ -f "$SCRIPT_DIR/$helper" ]] || { echo "ERROR: $helper missing from package" >&2; exit 1; }
 done
 
@@ -148,17 +171,29 @@ submit_metal() (
     local start_index=0 result status recorded_count saved_dep i
     if [[ ! -f "$dir/metal.json" || ! -f "$dir/control" || ! -f "$dir/coord" || \
           ! -f "$dir/def.inp" || ! -f "$dir/tm_workflow.py" || \
-          ! -f "$dir/turbo.pipeline.optimized.slurm" || -e "$dir/control.template" ]]; then
+          ! -f "$dir/turbo.pipeline.slurm" || -e "$dir/control.template" ]]; then
         echo "ERROR SUBMIT $metal: not a valid prepared folder, or control.template exists" >&2
         return 1
     fi
     # Never submit consolidated stage names to an older per-metal script.
-    if ! grep -Fq 'ridft_eiger_fix' "$dir/turbo.pipeline.optimized.slurm" ||
-       ! grep -Fq 'jobex_eiger' "$dir/turbo.pipeline.optimized.slurm"; then
+    if ! grep -Fq 'ridft_eiger_fix' "$dir/turbo.pipeline.slurm" ||
+       ! grep -Fq 'jobex_eiger' "$dir/turbo.pipeline.slurm"; then
         echo "ERROR SUBMIT $metal: per-metal SLURM script is outdated; review/update it manually." >&2
         return 1
     fi
 
+    if ((screwer_auto)) && { [[ ! -f "$dir/screwer_workflow.py" ]] || [[ ! -f "$dir/turbo.screwer.slurm" ]] || [[ ! -f "$dir/setup_lanthanides.py" ]]; }; then
+        echo "ERROR SUBMIT $metal: screwer gate/helper missing; existing directory is not modified." >&2
+        return 1
+    fi
+    if ((screwer_auto)); then
+        for helper in screwer_workflow.py turbo.screwer.slurm setup_lanthanides.py; do
+            if ! cmp -s "$SCRIPT_DIR/$helper" "$dir/$helper"; then
+                echo "ERROR SUBMIT $metal: $helper differs from the installed version; review/update manually." >&2
+                return 1
+            fi
+        done
+    fi
     # Serializes two simultaneous lan-run processes targeting the same metal.
     # A stale lock after SIGKILL requires inspection; never break it automatically.
     if ! mkdir "$dir/.lan_submission_lock" 2>/dev/null; then
@@ -173,6 +208,7 @@ submit_metal() (
 
     local stages=(ridft_eiger_fix integer_ridft jobex_eiger)
     if [[ "$frequency" != none ]]; then stages+=("$frequency"); fi
+    if ((screwer_auto)); then stages+=(screwer_gate); fi
 
     if ((resume_partial)); then
         if ! result="$(python3 "$SCRIPT_DIR/submission_guard.py" resume --dir "$dir" --stages "${stages[@]}")"; then
@@ -222,8 +258,12 @@ submit_metal() (
             ridft_eiger_fix|integer_ridft) time_limit='2-00:00:00'; memory="$RIDFT_MEM"; cpus="$TM_CPUS" ;;
             jobex_eiger) time_limit='2-00:00:00'; memory="$JOBEX_MEM"; cpus="$TM_CPUS" ;;
             numforce|aoforce) time_limit='2-00:00:00'; memory="$HESS_MEM"; cpus="$TM_CPUS" ;;
+            screwer_gate) time_limit='00:10:00'; memory='1G'; cpus=1; partition='short' ;;
         esac
         local export_spec="ALL,TM_STAGE=$stage"
+        if [[ "$stage" == screwer_gate ]]; then
+            export_spec="ALL,TM_SCREWER_METHOD=$frequency"
+        fi
         if [[ "$frequency" == none && "$stage" == jobex_eiger ]]; then
             export_spec+=",TM_FINAL_NO_HESSIAN=1"
         fi
@@ -233,7 +273,9 @@ submit_metal() (
                     --export="$export_spec")
         if [[ -n "$dep" ]]; then opts+=("--dependency=afterok:$dep"); fi
         printf 'stage=%s\nmetal=%s\n' "$stage" "$metal" > "$dir/.lan_submission_pending" || return 1
-        if ! raw="$(cd "$dir" && sbatch "${opts[@]}" turbo.pipeline.optimized.slurm)"; then
+        local jobscript='turbo.pipeline.slurm'
+        if [[ "$stage" == screwer_gate ]]; then jobscript='turbo.screwer.slurm'; fi
+        if ! raw="$(cd "$dir" && sbatch "${opts[@]}" "$jobscript")"; then
             rm -f "$dir/.lan_submission_pending"
             echo "ERROR $metal: sbatch failed at $stage; previous submitted stages are preserved." >&2
             return 1
@@ -258,7 +300,7 @@ submit_metal() (
     if [[ "$frequency" == none ]]; then
         echo "SUBMITTED $metal: 3-job geometry-only chain (6 scientific stages; no Hessian; final SLURM job $dep)"
     else
-        echo "SUBMITTED $metal: 4-job $frequency chain (7 scientific stages; final SLURM job $dep)"
+        echo "SUBMITTED $metal: $((4 + screwer_auto))-job $frequency chain (7 scientific stages; screwer gate=$screwer_auto; final SLURM job $dep)"
     fi
 )
 
