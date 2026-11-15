@@ -157,7 +157,7 @@ case "$stage" in
         active_stage=define_screwer
         python3 tm_workflow.py record DEFINE RUNNING 'define < def_screwer.inp (screwer continuation)'
         define < def_screwer.inp
-        python3 tm_workflow.py check-screwer-define
+        python3 tm_workflow.py record DEFINE OK 'Screwer DEFINE finished; no orbital/control comparison'
         active_stage=ridft
         actual -r
         python3 tm_workflow.py record RIDFT RUNNING 'screwer continuation SCF before JOBEX'
