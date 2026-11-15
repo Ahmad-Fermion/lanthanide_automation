@@ -145,6 +145,13 @@ original metal's `metal.json`, which was prepared using `def.inp` or
 the existing checks verify that inherited orbitals and occupations remain unchanged
 and that `$fermi` has not been introduced.
 
+**Screwer DEFINE orbital validation:** Comments, trailing spaces, and harmless
+header reformatting in `alpha`, `beta`, or `mos` do not count as orbital changes.
+The check still compares the underlying orbital data and the inherited shell
+occupations, and verifies that `$fermi` is absent. Previously prepared Screwer
+folders with legacy byte-level hashes are checked against their untouched
+parent orbital files (no automatic overwrite or rerun).
+
 For a completed, verified Hessian calculation:
 
 ```bash

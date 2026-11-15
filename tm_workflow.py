@@ -129,6 +129,41 @@ def restore_after_integer_scf():
            else 'initial integer alpha/beta shells confirmed after ridft')
 
 
+def _orbital_data_sha256(path):
+    """Hash orbital data, not DEFINE's formatting and comments.
+
+    TURBOMOLE can remove SCF-energy comments or rewrite padded MO headers.
+    Preserve the numerical characters and orbital ordering; only normalize
+    whitespace and discard full-line comments.
+    """
+    digest = hashlib.sha256()
+    rows = 0
+    with path.open(encoding='utf-8', errors='replace') as handle:
+        for line in handle:
+            data = line.strip()
+            if not data or data.startswith('#'):
+                continue
+            if data.startswith('$') or 'eigenvalue=' in data.lower():
+                data = ' '.join(data.split())
+            else:
+                # Packed D-format coefficients may be separated by optional
+                # spaces; keep all numerical characters and their order.
+                data = ''.join(data.split())
+            digest.update(data.encode('utf-8') + b'\n')
+            rows += 1
+    if not rows:
+        raise RuntimeError(f'{path}: empty orbital data')
+    return digest.hexdigest()
+
+
+def _raw_sha256(path):
+    checksum = hashlib.sha256()
+    with path.open('rb') as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b''):
+            checksum.update(block)
+    return checksum.hexdigest()
+
+
 def screwer_inheritance(directory):
     """Fingerprint parent MOs and shell groups; Screwer must reuse this state.
 
@@ -139,13 +174,7 @@ def screwer_inheritance(directory):
         ['mos'] if (directory / 'mos').is_file() else [])
     if not orb_files:
         raise RuntimeError(f'{directory}: inherited alpha/beta or mos orbital files missing; refusing screwer continuation')
-    orbitals = {}
-    for name in orb_files:
-        checksum = hashlib.sha256()
-        with (directory / name).open('rb') as handle:
-            for block in iter(lambda: handle.read(1024 * 1024), b''):
-                checksum.update(block)
-        orbitals[name] = checksum.hexdigest()
+    orbitals = {name: _orbital_data_sha256(directory / name) for name in orb_files}
     control = (directory / 'control').read_text()
     # Find whole shell blocks with explicit data-group boundaries.
     pattern = re.compile(r'(?ims)^[ \t]*\$(?:alpha|beta|closed)\s+shells\b.*?(?=^[ \t]*\$|\Z)')
@@ -171,11 +200,29 @@ def check_screwer_define():
         if not (HERE / name).is_file():
             raise RuntimeError(f'screwer DEFINE missing {name}')
     expected = info.get('inherited_state')
-    current = screwer_inheritance(HERE)
-    if not expected or current != expected:
-        raise RuntimeError('DEFINE changed inherited orbital files or shell occupations; stop and inspect def_screwer.inp')
+    current = screwer_inheritance(HERE)  # also verifies absence of $fermi
+    if not isinstance(expected, dict):
+        raise RuntimeError('Screwer inherited state reference missing')
+    if expected.get('shell_groups') != current['shell_groups']:
+        raise RuntimeError('Screwer DEFINE changed inherited shell occupations')
+    old_hashes = expected.get('orbitals_sha256')
+    new_hashes = current['orbitals_sha256']
+    if not isinstance(old_hashes, dict) or old_hashes.keys() != new_hashes.keys():
+        raise RuntimeError('Screwer inherited orbital file set changed')
+    if old_hashes != new_hashes:
+        # Older screwer_prepared.json files saved hashes of *raw bytes*.
+        # These are expected to differ when DEFINE rewrites MO comments.
+        # Validate against the original parent rather than rejecting an
+        # otherwise unchanged prepared correction directory.
+        for name in old_hashes:
+            original = HERE.parent / name
+            if (not original.is_file()
+                    or _raw_sha256(original) != old_hashes[name]
+                    or _orbital_data_sha256(original) != new_hashes[name]):
+                raise RuntimeError(f'Screwer DEFINE changed {name} orbital data, or its legacy preparation reference cannot be verified')
+        print('NOTE: legacy raw orbital hashes verified against normalized parent orbitals', flush=True)
     (HERE / 'define_setup.ok').write_text(now() + '\n')
-    record('DEFINE', 'OK', 'screwer DEFINE verified; inherited orbitals and occupations unchanged; no Fermi smearing')
+    record('DEFINE', 'OK', 'screwer DEFINE preserved orbital data and shell occupations; no Fermi smearing')
 
 
 def check_define():
