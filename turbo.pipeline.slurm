@@ -155,9 +155,9 @@ case "$stage" in
             exit 2
         }
         active_stage=define_screwer
-        python3 tm_workflow.py record DEFINE RUNNING 'define < def_screwer.inp (screwer continuation)'
-        define < def_screwer.inp
-        python3 tm_workflow.py record DEFINE OK 'Screwer DEFINE finished; no orbital/control comparison'
+        python3 tm_workflow.py record DEFINE RUNNING 'Screwer DEFINE with no-ired fallback on failure'
+        python3 screwer_workflow.py --define-fallback
+        python3 tm_workflow.py record DEFINE OK 'Screwer DEFINE validated; continuing without orbital/control comparison'
         active_stage=ridft
         actual -r
         python3 tm_workflow.py record RIDFT RUNNING 'screwer continuation SCF before JOBEX'

@@ -137,6 +137,14 @@ The Screwer DEFINE template is copied **verbatim** (not modified using the
 initial setup's `b`/`u` basis and spin selectors), because the continuation
 inherits orbitals and shell occupations from the completed metal calculation.
 For Gd, `def_screwer_gd.inp` is selected and copied as `def_screwer.inp`.
+For non-Gd metals, optionally place **`def_screwer_ln.inp`** next to the other
+project templates: it is a complete alternate DEFINE input that skips `ired`.
+If the primary DEFINE does not finish normally or leaves `control` missing
+`$coord` or `$atoms`, the new Screwer correction job restores its prepared
+inputs and retries once with `def_screwer_ln.inp`. The fallback is copied into
+the correction directory during preparation. For Gd, the generic Ln template
+is **never** substituted: a distinct optional `def_screwer_gd_ln.inp` is needed
+for automatic fallback if its dedicated DEFINE input fails.
 The Screwer template does **not** need `eht`, a charge, `b`, or `u` commands:
 those settings are inherited from the completed calculation's `control` and
 orbital files. When available, the charge recorded in `screwer_prepared.json`
@@ -144,15 +152,10 @@ comes from the original metal's `metal.json`, which was prepared using
 `def.inp` or `def_gd.inp`; it is **not** inferred from `def_screwer.inp`.
 For a manual parent without `metal.json`, the charge is recorded as unknown
 rather than guessed; the existing `control` is inherited. After DEFINE,
-the existing checks verify that inherited orbitals and occupations remain unchanged
-and that `$fermi` has not been introduced.
-
-**Screwer DEFINE orbital validation:** Comments, trailing spaces, and harmless
-header reformatting in `alpha`, `beta`, or `mos` do not count as orbital changes.
-The check still compares the underlying orbital data and the inherited shell
-occupations, and verifies that `$fermi` is absent. Previously prepared Screwer
-folders with legacy byte-level hashes are checked against their untouched
-parent orbital files (no automatic overwrite or rerun).
+Screwer DEFINE is allowed to change inherited orbital files, occupations,
+and `control`; it does not perform the initial Fermi/occupation-reset stages.
+Only DEFINE's successful exit and required resulting input files/data groups
+are checked before RIDFT.
 
 **Manually completed TURBOMOLE calculations:** `lan-screwer` also accepts a
 metal folder without `workflow_status.json`, `chain_submission.tsv`, or
@@ -203,20 +206,25 @@ runs `screwer < screwer.inp`, checks that `$newcoord` describes a genuinely
 negative mode, generates `$coord` using `sdg -b newcoord`, then invokes
 `kdg newcoord`, `kdg coord`, `kdg symmetry`, `kdg optimize` in that order.
 It prepares `screwer_prepared.json` and submits a **separate two-job**
-correction chain: **(1) `define < def_screwer.inp` → `actual -r` →
-RIDFT → JOBEX → EIGER; (2) AOFORCE or NumForce**. The single pre-JOBEX
+correction chain: **(1) primary Screwer DEFINE, with one clean fallback
+attempt if necessary → `actual -r` → RIDFT → JOBEX → EIGER;
+(2) AOFORCE or NumForce**. The first DEFINE output is saved as `define.out`;
+any retry output is saved separately as `define.fallback.out`. A successful
+DEFINE must report normal completion and leave usable `$coord` and `$atoms`
+groups in `control`, as well as basis and orbital inputs. If both attempts fail,
+RIDFT is **never** started. The single pre-JOBEX
 RIDFT runs on the displaced structure, with no separate SLURM allocation
 or automatic SCF retry; convergence is checked before JOBEX. JOBEX also
 performs its own RI-DFT SCF/gradient cycles as required. The original
 Fermi-smearing initialization, pre-JOBEX EIGER, occupation restoration,
 and integer-RIDFT stages are deliberately **not** repeated.
 
-Unlike the normal initial DEFINE check, the screwer DEFINE validator requires
-**no `$fermi`** and verifies that the inherited MO files (`alpha`/`beta`,
-or `mos`) and shell occupation groups have not changed. If DEFINE changes
-these, the job **stops for manual inspection**; the software does not reset
-occupations or silently replace the electronic state. This is a continuity
-check, not independent validation of the physical electronic state.
+Unlike the normal initial DEFINE check, the Screwer DEFINE completion check
+does **not** compare MO coefficients, shell occupations, or control contents
+against the prior state. This is an intentional continuation; a successful
+DEFINE must produce structurally usable input for the subsequent RIDFT.
+`def_screwer_ln.inp` is used only if the primary DEFINE fails; it is not used
+for the initial `lan-run` configuration.
 The scientific correction runs **only once**; no
 recursive automatic re-distortion is scheduled, even if the new Hessian has
 remaining imaginary frequencies.

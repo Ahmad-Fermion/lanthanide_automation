@@ -13,6 +13,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 
 
 METALS = ('la', 'ce', 'pr', 'nd', 'sm', 'eu', 'gd', 'tb', 'dy', 'ho', 'er', 'tm', 'yb', 'lu')
@@ -226,6 +227,13 @@ def prepare(base, metal, method, *, min_negative=0):
             raise RuntimeError(f'{child / name}: cpc left a symbolic link; refusing to modify linked files')
     shutil.copy2(base / 'screwer.inp', child / 'screwer.inp')
     (child / 'def_screwer.inp').write_text(generated_define)
+    # Optional DEFINE fallback: a separate no-ired input, copied now so queued
+    # jobs use the tested project template even if the master later changes.
+    fallback = 'def_screwer_gd_ln.inp' if metal == 'gd' else 'def_screwer_ln.inp'
+    if (base / fallback).is_file():
+        shutil.copy2(base / fallback, child / fallback)
+    else:
+        print(f'NOTE {metal}: no {fallback}; DEFINE will stop if its primary input fails', flush=True)
     # cpc copies TURBOMOLE data, not necessarily our custom metadata.
     # The correction retains the parent's Ln/charge/spin; never invent values.
     if metal_meta.is_file():
@@ -293,6 +301,112 @@ def prepare(base, metal, method, *, min_negative=0):
     return child
 
 
+
+# Files DEFINE may update while processing the displaced geometry.  Preserve
+# the pre-DEFINE inputs for a clean fallback attempt, *only inside the child*.
+DEFINE_INPUTS = ('control', 'coord', 'basis', 'auxbasis', 'alpha', 'beta',
+                 'mos', 'statistics', 'intdef', 'wherefrom', 'gradient',
+                 'energy', 'hessapprox', 'job.start', 'job.last')
+
+
+def validate_screwer_define(child, result):
+    """DEFINE can return 0 after a stopped menu; verify normal completion.
+
+    The geometry and atom data groups can be present inline or through
+    file= references.  This intentionally does NOT compare orbital contents,
+    shell occupations, or the inherited control to their original values.
+    """
+    if result.returncode:
+        raise RuntimeError(f'DEFINE exited with code {result.returncode}')
+    if not re.search(r'(?i)define\s*:\s*all\s+done|define\s+ended\s+normally',
+                     result.stdout):
+        raise RuntimeError('DEFINE did not report normal completion')
+    control = child / 'control'
+    if not control.is_file() or not control.stat().st_size:
+        raise RuntimeError('DEFINE did not produce a nonempty control file')
+    data = control.read_text(errors='replace')
+    for group in ('coord', 'atoms'):
+        if not re.search(r'(?im)^[ \t]*\$' + group + r'(?=\s|$)', data):
+            raise RuntimeError(f'DEFINE left control without ${group}')
+    coord = child / 'coord'
+    if not coord.is_file() or not coord.stat().st_size:
+        raise RuntimeError('DEFINE left the coordinate file missing/empty')
+    # The basis and MO files are required to continue RIDFT, but may be
+    # rewritten by DEFINE (a legitimate continuation behavior).
+    for name in ('basis', 'auxbasis'):
+        if not (child / name).is_file() or not (child / name).stat().st_size:
+            raise RuntimeError(f'DEFINE left {name} missing/empty')
+    if not ((child / 'alpha').is_file() and (child / 'beta').is_file()) and not (child / 'mos').is_file():
+        raise RuntimeError('DEFINE left no alpha/beta or mos orbitals for continuation')
+
+
+def run_define_with_fallback(child):
+    """Run Screwer DEFINE once; retry without ired from a clean snapshot.
+
+    Unlike initial lan-run, Screwer DEFINE may update control and MOs.  Its
+    only validation is normal program completion and usable required inputs.
+    """
+    manifest = child / 'screwer_prepared.json'
+    if not manifest.is_file():
+        raise RuntimeError(f'{child}: no Screwer preparation manifest')
+    info = json.loads(manifest.read_text())
+    metal = info.get('metal')
+    if metal not in METALS:
+        raise RuntimeError(f'{manifest}: invalid metal')
+    primary = child / 'def_screwer.inp'
+    fallback_name = 'def_screwer_gd_ln.inp' if metal == 'gd' else 'def_screwer_ln.inp'
+    fallback = child / fallback_name
+    if not primary.is_file() or not primary.stat().st_size:
+        raise RuntimeError(f'{primary}: missing/empty primary DEFINE input')
+    with tempfile.TemporaryDirectory(prefix='.screwer_define_snapshot_', dir=child) as scratch:
+        backups = Path(scratch)
+        existed = set()
+        for name in DEFINE_INPUTS:
+            path = child / name
+            if path.is_symlink():
+                raise RuntimeError(f'{path}: refusing to snapshot a symlink')
+            if path.is_file():
+                shutil.copy2(path, backups / name)
+                existed.add(name)
+
+        def restore():
+            for name in DEFINE_INPUTS:
+                target = child / name
+                if name in existed:
+                    if target.is_symlink():
+                        target.unlink()
+                    shutil.copy2(backups / name, target)
+                elif target.exists() and target.is_file():
+                    target.unlink()  # newly generated DEFINE input/output only
+
+        def attempt(template, logfile):
+            result = execute(['define'], cwd=child, input_text=template.read_text(), timeout=None)
+            (child / logfile).write_text(result.stdout)
+            try:
+                validate_screwer_define(child, result)
+                return None
+            except RuntimeError as error:
+                return str(error)
+
+        first_error = attempt(primary, 'define.out')
+        if first_error is None:
+            print(f'{child}: DEFINE succeeded using {primary.name}', flush=True)
+            return
+        print(f'WARNING {child}: {primary.name} failed: {first_error}', flush=True)
+        restore()
+        if not fallback.is_file() or not fallback.stat().st_size:
+            raise RuntimeError(f'{child}: no {fallback_name} to retry DEFINE; prepared inputs restored; see define.out')
+        if re.search(r'(?im)^\s*ired(?:\s|$)', fallback.read_text()):
+            raise RuntimeError(f'{fallback}: fallback still requests ired; prepared inputs restored')
+        print(f'{child}: retrying DEFINE with {fallback_name} from restored inputs', flush=True)
+        second_error = attempt(fallback, 'define.fallback.out')
+        if second_error is not None:
+            restore()
+            raise RuntimeError(f'{child}: DEFINE fallback also failed: {second_error}; '
+                               'prepared inputs restored; see define.out and define.fallback.out')
+        print(f'{child}: DEFINE fallback succeeded using {fallback_name}', flush=True)
+
+
 def submit(child, method):
     """Submit one 2-allocation JOBEX/EIGER + Hessian chain; no automatic repeat."""
     manifest = child / 'screwer_prepared.json'
@@ -314,6 +428,8 @@ def submit(child, method):
     script = (child / 'turbo.pipeline.slurm').read_text()
     if "screwer continuation SCF before JOBEX" not in script:
         raise RuntimeError(f'{child}: older Screwer SLURM script lacks pre-JOBEX RIDFT; inspect/update it manually before submitting')
+    if '--define-fallback' not in script:
+        raise RuntimeError(f'{child}: copied SLURM script lacks DEFINE fallback; inspect/update it manually')
     if shutil.which('sbatch') is None:
         raise RuntimeError('sbatch not found; submit on VACC')
     stages = (*STAGES, method)
@@ -424,17 +540,27 @@ def main():
     parser.add_argument('method', nargs='?', choices=['num', 'ao', 'numforce', 'aoforce'],
                         help='Hessian method from the completed original calculation')
     parser.add_argument('--base', type=Path, default=Path.cwd(), help='project directory')
-    parser.add_argument('--metals', nargs='+', choices=METALS, required=True, help='metals to process')
+    parser.add_argument('--metals', nargs='+', choices=METALS, help='metals to process')
     action = parser.add_mutually_exclusive_group()
     action.add_argument('--prepare-only', action='store_true', help='create screwer_<metal>/ inputs but do not submit')
     action.add_argument('--submit-prepared', action='store_true', help='submit an already prepared screwer_<metal>/ directory')
     action.add_argument('--export-only', action='store_true', help='extract $noproj data for completed screwer corrections')
     action.add_argument('--clean-frequency', action='store_true', help=argparse.SUPPRESS)
+    action.add_argument('--define-fallback', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--min-imag', type=float, default=0.0,
                         help='only trigger on frequencies strictly below -VALUE cm^-1 (default 0)')
     args = parser.parse_args()
     if not (0 <= args.min_imag < float('inf')):
         parser.error('--min-imag must be a finite nonnegative number')
+    if args.define_fallback:
+        try:
+            run_define_with_fallback(Path.cwd())
+            return 0
+        except (RuntimeError, OSError, ValueError) as error:
+            print(f'ERROR Screwer DEFINE: {error}', file=sys.stderr)
+            return 1
+    if not args.metals:
+        parser.error('--metals is required')
     method = {'num': 'numforce', 'ao': 'aoforce', 'numforce': 'numforce', 'aoforce': 'aoforce'}.get(args.method)
     if not (args.export_only or args.clean_frequency) and not method:
         parser.error('choose num or ao (unless using --export-only)')
