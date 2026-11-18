@@ -47,6 +47,13 @@ cd "$SLURM_SUBMIT_DIR"
     exit 1
 }
 
+# Recovery of old Screwer children may have copied an older workflow script.
+# The recovery launcher supplies the versioned development controller explicitly.
+SCREWER_CONTROLLER="${TM_RECOVERY_SCREWER_TOOL:-screwer_workflow.py}"
+if [[ -n "${TM_RECOVERY_SCREWER_TOOL:-}" && ! -f "$SCREWER_CONTROLLER" ]]; then
+    echo "ERROR: pinned Screwer recovery controller is missing: $SCREWER_CONTROLLER" >&2
+    exit 2
+fi
 stage="${TM_STAGE:-}"
 case "$stage" in
     ridft|ridft_eiger_fix|eiger_pre|occupation_fix|integer_ridft|eiger_fix_integer_ridft|jobex|jobex_eiger|screwer_jobex_eiger|screwer_ridft_jobex_eiger|restricted_ridft|restricted_ridft_no_define|eiger_post|numforce|aoforce) ;;
@@ -249,7 +256,7 @@ case "$stage" in
                 if [[ -f "$f" ]]; then mv -- "$f" "$archive/$f"; fi
             done
         elif [[ "${TM_SCREWER_CHILD:-0}" == 1 ]]; then
-            python3 screwer_workflow.py --clean-frequency --base "$(dirname "$(dirname "$PWD")")" --metals "$(basename "$(dirname "$PWD")")"
+            python3 "$SCREWER_CONTROLLER" --clean-frequency --folder "$PWD"
         fi
         python3 tm_workflow.py record NUMFORCE RUNNING 'PARNODES=1 NumForce -ri -central'
         # VERIFIED: exactly one displacement worker, OpenMP threads from allocation.
@@ -257,7 +264,12 @@ case "$stage" in
         python3 tm_workflow.py check-numforce
         python3 tm_workflow.py record DONE SUCCESS 'NumForce completed; see occupation warnings'
         if [[ "${TM_SCREWER_CHILD:-0}" == 1 ]]; then
-            python3 screwer_workflow.py --export-only --base "$(dirname "$(dirname "$PWD")")" --metals "$(basename "$(dirname "$PWD")")"
+            python3 "$SCREWER_CONTROLLER" --export-only --folder "$PWD"
+            # Explicitly capped extra correction cycles; do not invalidate a successful Hessian
+            # if scheduling the next (independent) cycle fails. Log a clear diagnostic.
+            if ! python3 "$SCREWER_CONTROLLER" --advance-cycle --folder "$PWD" > cycle-advance.log 2>&1; then
+                echo "WARNING: optional next Screwer cycle failed; inspect $PWD/cycle-advance.log" >&2
+            fi
         fi
         ;;
 
@@ -274,14 +286,19 @@ case "$stage" in
                 if [[ -f "$f" ]]; then mv -- "$f" "$archive/$f"; fi
             done
         elif [[ "${TM_SCREWER_CHILD:-0}" == 1 ]]; then
-            python3 screwer_workflow.py --clean-frequency --base "$(dirname "$(dirname "$PWD")")" --metals "$(basename "$(dirname "$PWD")")"
+            python3 "$SCREWER_CONTROLLER" --clean-frequency --folder "$PWD"
         fi
         python3 tm_workflow.py record AOFORCE RUNNING 'aoforce'
         aoforce > aoforce.out 2>&1
         python3 tm_workflow.py check-aoforce
         python3 tm_workflow.py record DONE SUCCESS 'aoforce completed; see occupation warnings'
         if [[ "${TM_SCREWER_CHILD:-0}" == 1 ]]; then
-            python3 screwer_workflow.py --export-only --base "$(dirname "$(dirname "$PWD")")" --metals "$(basename "$(dirname "$PWD")")"
+            python3 "$SCREWER_CONTROLLER" --export-only --folder "$PWD"
+            # Explicitly capped extra correction cycles; do not invalidate a successful Hessian
+            # if scheduling the next (independent) cycle fails. Log a clear diagnostic.
+            if ! python3 "$SCREWER_CONTROLLER" --advance-cycle --folder "$PWD" > cycle-advance.log 2>&1; then
+                echo "WARNING: optional next Screwer cycle failed; inspect $PWD/cycle-advance.log" >&2
+            fi
         fi
         ;;
 esac

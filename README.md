@@ -446,3 +446,42 @@ with a verified charge, Pr Screwer fallback, Screwer RIDFT/JOBEX failure,
 and Hessian-only recovery. Compare basis/ECP, occupations, method data
 groups, convergence evidence and resulting energies with reference jobs.
 No automated test can establish a unique physical electronic ground state.
+
+
+### Development: bounded Screwer cycles and recovery plans
+
+`lan-recover --plan` never modifies files. A `$fermi` entry in a Screwer
+`control` produces a prominent warning, not a planning failure. Submission
+retains the user's existing smearing choice; verify it before using `--submit`.
+A verified Hessian with negative modes is **not** resubmitted by recovery; use
+Screwer to create a separate correction cycle.
+
+Screwer cycle 1 keeps its existing `METAL/screwer_METAL` directory. Cycle 2
+is `METAL/screwer_METAL/screwer_METAL_cycle2`; cycle 3 is nested inside
+cycle 2, and so on. Every cycle preserves the preceding results. A cycle
+is only eligible after the previous cycle has completed its Hessian.
+
+From the EF project root, manually start a further correction after cycle 1:
+
+```bash
+lan-screwer ao --metals lu --cycle 2 --prepare-only
+lan-screwer ao --metals lu --cycle 2 --submit-prepared
+```
+
+For a **fresh cycle 1**, opt into bounded automatic continuation:
+
+```bash
+lan-screwer ao --metals lu --max-cycles 3 --prepare-only
+lan-screwer ao --metals lu --max-cycles 3 --submit-prepared
+```
+
+Upon successful Hessian verification, each cycle checks the first eight
+`vibspectrum` mode rows and, if a mode is below `--min-imag`, creates and
+submits the next cycle. The cap is immutable in the prepared manifest. No
+looping occurs by default (`--max-cycles` omitted means only the selected
+cycle). Automatic scheduling errors are reported in `cycle-advance.log` and
+do not invalidate an otherwise successful Hessian. This feature is
+**development-only** until tested with TURBOMOLE 7.9 and SLURM on VACC.
+
+Universal recovery now recognizes nested Screwer cycles as well; it still
+never re-runs Screwer displacement or DEFINE automatically.

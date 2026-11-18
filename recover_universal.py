@@ -71,18 +71,23 @@ def identify(path, base=None, metal=None):
             path = root
         elif '/' in metal:
             outer, inner = metal.split('/', 1)
-            if outer not in METALS or inner != f'screwer_{outer}':
-                raise RecoveryError('--metal path must be like nd/screwer_nd')
-            path = root / outer / inner
+            if outer not in METALS:
+                raise RecoveryError('--metal path must begin with a lanthanide symbol')
+            path = root / metal
         elif metal in METALS or metal in ('la_closedshell', 'lu_closedshell'):
             path = root / metal
         else:
             raise RecoveryError('invalid --metal')
-    if path.name.startswith('screwer_') and path.parent.name in METALS:
-        metal = path.parent.name
-        if path.name != f'screwer_{metal}':
-            raise RecoveryError('Screwer path does not match parent metal')
-        return path, metal, 'screwer'
+    # Correction cycles are nested to preserve each preceding calculation.
+    ancestor = path.parent
+    while ancestor.name not in METALS and ancestor.parent != ancestor:
+        ancestor = ancestor.parent
+    if ancestor.name in METALS and path != ancestor:
+        metal = ancestor.name
+        parts = path.relative_to(ancestor).parts
+        if parts and parts[0] == f'screwer_{metal}' and all(
+                part == f'screwer_{metal}_cycle{i}' for i, part in enumerate(parts[1:], 2)):
+            return path, metal, 'screwer'
     if path.name in METALS:
         return path, path.name, 'standard'
     if path.name.endswith('_closedshell') and path.name[:-12] in ('la', 'lu'):
@@ -164,17 +169,26 @@ def stage_plan(folder, kind, method):
     if kind == 'screwer':
         if not (folder / 'screwer_prepared.json').is_file():
             raise RecoveryError('Screwer manifest is missing')
-        if re.search(r'(?m)^\s*\$fermi\b', text(folder / 'control')):
-            raise RecoveryError('Screwer contains $fermi; electronic state requires manual review')
     is_restricted = (folder / 'restricted_prepared.json').is_file()
     if folder.name.endswith('_closedshell') and not is_restricted:
         raise RecoveryError('closed-shell directory lacks restricted preparation manifest')
     if is_restricted and kind != 'standard':
         raise RecoveryError('unexpected restricted-Screwer combination')
     if geometry_ok(folder):
-        if method == 'none' or hessian_ok(folder, method):
+        if method == 'none':
+            return [], 'geometry converged; no Hessian requested'
+        if hessian_ok(folder, method):
+            if kind == 'screwer':
+                try:
+                    from screwer_workflow import spectrum_modes
+                    negatives = [(mode, val) for mode, val in spectrum_modes(folder / 'vibspectrum') if val < 0]
+                    if negatives:
+                        return [], ('current Hessian completed with %d negative mode(s); '
+                                    'use lan-screwer --cycle to prepare another correction, not lan-recover' % len(negatives))
+                except (RuntimeError, OSError, ValueError):
+                    pass
             return [], 'geometry converged; requested final stage already complete'
-        return [method], 'geometry converged; submit Hessian only'
+        return [method], 'geometry converged; no verified current Hessian; submit Hessian only'
     if is_restricted:
         ctrl = text(folder / 'control')
         if re.search(r'(?m)^\s*\$uhf\b', ctrl):
@@ -197,8 +211,6 @@ def stage_plan(folder, kind, method):
             reason = 'Screwer DEFINE complete; restart SCF + JOBEX without DEFINE'
         return stages + ([method] if method != 'none' else []), reason
     if scf_ok(folder / 'ridft.integer.out'):
-        if re.search(r'(?m)^\s*\$fermi\b', text(folder / 'control')):
-            raise RecoveryError('integer SCF finished but $fermi remains in control; occupation state needs manual review')
         return ['jobex_eiger'] + ([method] if method != 'none' else []), 'integer SCF converged; restart JOBEX'
     if not (folder / 'initial_occupations').is_file():
         raise RecoveryError('initial_occupations missing; cannot safely restore the original open-shell state')
@@ -277,6 +289,7 @@ def submit(folder, metal, kind, method, stages, script_root):
             exports = ['ALL', f'TM_STAGE={stage}', 'TM_RECOVERY=1']
             if kind == 'screwer':
                 exports.append('TM_SCREWER_CHILD=1')
+                exports.append('TM_RECOVERY_SCREWER_TOOL=' + str((script_root / 'screwer_workflow.py').resolve()))
             if not (folder / 'metal.json').is_file():
                 exports.extend(['TM_MANUAL_RECOVERY=1', f'TM_MANUAL_METAL={metal}'])
             if method == 'none' and stage == 'jobex_eiger':
@@ -305,6 +318,16 @@ def submit(folder, metal, kind, method, stages, script_root):
         lock.rmdir()
 
 
+def recovery_warnings(folder, kind):
+    warnings = []
+    if re.search(r'(?m)^\s*\$fermi\b', text(folder / 'control')):
+        if kind == 'screwer':
+            warnings.append('Screwer contains $fermi: retained as user-configured; verify intended smearing/occupations before submitting')
+        elif scf_ok(folder / 'ridft.integer.out'):
+            warnings.append('Integer SCF completed but $fermi remains: verify intended occupation treatment before submitting')
+    return warnings
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Universal, non-destructive SLURM recovery for normal or Screwer calculations')
     parser.add_argument('method', nargs='?', choices=['ao', 'num', 'aoforce', 'numforce'],
@@ -326,13 +349,17 @@ def main(argv=None):
             raise RecoveryError('choose either positional method or --frequency, not both')
         method = selected_method(folder, kind, args.method or args.frequency)
         stages, reason = stage_plan(folder, kind, method)
+        warnings = recovery_warnings(folder, kind)
         output = {'directory': str(folder), 'metal': metal, 'kind': kind, 'frequency': method,
-                  'stages': stages, 'reason': reason, 'writes_inputs_on_submission': False}
+                  'stages': stages, 'reason': reason, 'warnings': warnings,
+                  'writes_inputs_on_submission': False}
         if args.json:
             print(json.dumps(output, indent=2))
         else:
             print(f'RECOVERY PLAN: {folder}\n  kind: {kind}; Hessian: {method}\n  reason: {reason}')
             print('  stages: ' + (' -> '.join(stages) if stages else '(none)'))
+            for warning in warnings:
+                print('  WARNING: ' + warning)
         if args.submit:
             if not stages:
                 print('Nothing to recover; no jobs submitted')

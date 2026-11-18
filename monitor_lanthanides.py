@@ -376,6 +376,14 @@ def main():
         for child in (parent / f'screwer_{metal}', parent / 'screwer'):
             if child.exists():
                 targets.append((f'{metal}/{child.name}', child, spin))
+                if child.name == f'screwer_{metal}':
+                    previous = child
+                    for cycle in range(2, 11):
+                        next_child = previous / f'screwer_{metal}_cycle{cycle}'
+                        if not next_child.is_dir():
+                            break
+                        targets.append((f'{metal}/screwer_{metal}/cycle{cycle}', next_child, spin))
+                        previous = next_child
 
     attempts = {}
     for label, directory, _ in targets:
