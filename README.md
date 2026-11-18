@@ -39,6 +39,7 @@ bash install.sh
 | `lan-recover` | Restart failed RIDFT with your manual `control` edits; optionally continue |
 | `lan-setup` | Prepare folders **only**, without submitting |
 | `lan-status` | Show progress; write `workflow_status.csv` |
+| `lan-validate` | Read-only input validation using optional `turbomoleio` |
 
 By default, `lan-run` stops after geometry optimization and the post-optimization EIGER check, with **no Hessian** (useful for large models). Choose `lan-run num` = **NumForce** (for X2CSR) or `lan-run ao` = **aoforce** to include a Hessian. Full names `numforce`/`aoforce` also work.
 
@@ -70,6 +71,60 @@ lan-run --metals sm --resume-partial      # only unsent stages of a no-Hessian c
 The new `chain_plan.txt` records the original full 3- or 4-job stage plan; `chain_submission.tsv` records each accepted SLURM job ID. Resumption checks that the recorded stages are a valid prefix of that plan and queries `squeue` and `sacct` for the previous jobs' states and working directory. It depends on the last job if still active, or submits the next stage without a stale dependency only after confirming the last job finished successfully. The calculations themselves are **not rerun**. Failed, canceled, missing, mismatched, or ambiguous job records stop resumption and require manual review or `lan-recover` as appropriate. `--resume-partial` requires `--metals` and cannot be mixed with `--include-existing`.
 
 **Important:** Previously submitted chains from the older tool do not have `chain_plan.txt`, so they are **not automatically resumable** by this new command. The original Hessian choice cannot safely be inferred from an incomplete record. A `.lan_submission_pending` marker means the tool may have been interrupted after SLURM accepted a job but before its ID was saved; inspect SLURM carefully before reconciliation, and do not blindly delete this marker or `chain_submission.tsv`. A `.lan_submission_lock` prevents concurrent submissions to the same metal; stale locks also require manual verification.
+
+## Milestone 1: read-only input validation (`lan-validate`)
+
+This optional command uses the **installed `turbomoleio` 1.6.0 library** to parse
+TURBOMOLE `control` data groups. It does not call DEFINE, RIDFT, JOBEX, SLURM,
+or change any inputs/results. **No existing execution command calls it:** the
+production `lan-run`/`lan-screwer`/`lan-recover` pipelines are unchanged.
+
+Install the dependency in a separate Python virtual environment (do not modify
+an environment being used by running jobs):
+
+```bash
+python3 -m venv ~/venvs/lan-input-validation
+source ~/venvs/lan-input-validation/bin/activate
+python -m pip install "turbomoleio==1.6.0"
+# From this source repository: bash install.sh
+```
+
+The `lan-validate` launcher uses `python3` on the current `PATH`; activate the
+above environment whenever using the command. For the installed command, run:
+
+```bash
+cd /gpfs1/pi/crreinha/lanM_shared/small-model/svp-d4-wd-scf7/EF1738
+lan-validate --project-only                 # check masters for all 14 Ln
+lan-validate --metals pr eu er tm --include-screwer
+lan-validate --metals la gd                # check specific metal input folders
+lan-validate --metals pr --include-screwer --json  # JSON to stdout; nothing written
+```
+
+The validator distinguishes **project masters**, **fresh prepared inputs before
+DEFINE**, and **existing DEFINE-generated input files** (including Screwer
+corrections). Project masters may refer to basis/MO files not generated yet.
+Checks include readable data groups, duplicate groups, coordinate atom counts and
+finite positions, metal identity, referenced-file presence after DEFINE, and
+matching *stable* scientific settings from the project master or parent:
+functional, DFT grid, weight derivatives, SCF convergence, D4, ECP presence,
+selected relativistic flags, and related method switches. It checks metal.json
+identity and charge against the local initial `def.inp` when both are available.
+The initial charge is **never guessed** from `$charge from ridft` and the code
+does not compare or restore Screwer orbital coefficients or occupations.
+
+**Limitations:** Milestone 1 is an *input preflight*, not validation of the
+physically correct ground state, exact basis/ECP assignment for every atom,
+or SCF/geometry/frequency convergence. It does not yet parse the output logs.
+The Sci settings checks are scoped to those listed above; unusual X2CSR flags,
+auxiliary basis content, electronic occupations and all method-specific choices
+still need independent scientific review. Because actively running jobs change
+files, an input snapshot taken while they run can produce transient warnings.
+The validation exit code is 1 for any FAIL, 0 for PASS/WARN, and 2 if the
+`turbomoleio` dependency is unavailable. It is not connected to automatic
+submission blocking. Offline unit tests run with
+`PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v`.
+A real TURBOMOLE 7.9/VACC integration test is required before relying on its
+PASS result for production submission decisions.
 
 ## Monitoring calculations
 
