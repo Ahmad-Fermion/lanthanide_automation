@@ -7,7 +7,7 @@ mkdir -p -- "$bin_dir"
 bin_dir="$(cd -- "$bin_dir" && pwd -P)"
 dest="$bin_dir/lanthanide_automation"
 mkdir -p -- "$dest"
-for name in README.md setup_lanthanides.py submission_guard.py monitor_lanthanides.py tm_workflow.py screwer_workflow.py validate_lanthanides.py \
+for name in README.md setup_lanthanides.py submission_guard.py monitor_lanthanides.py tm_workflow.py screwer_workflow.py validate_lanthanides.py recover_universal.py closed_shell_workflow.py adaptive_define.py \
             submit-turbo-chain.sh submit-turbo-recovery.sh \
             turbo.pipeline.slurm turbo.resume.slurm turbo.screwer.slurm install.sh; do
     if [[ ! "$source_dir/$name" -ef "$dest/$name" ]]; then

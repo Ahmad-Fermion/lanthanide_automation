@@ -3,11 +3,32 @@
 # Does not call define and never creates or modifies input folders.
 set -Eeuo pipefail
 
+# Universal recovery, read-only by default. The old --ridft-only,
+# --full-chain and --continue-only modes retain their legacy semantics.
+for option in "$@"; do
+    case "$option" in
+        --plan|--submit|--json|--frequency)
+            here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+            exec python3 "$here/recover_universal.py" "$@" ;;
+    esac
+done
+if (($# == 0)); then
+    here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+    exec python3 "$here/recover_universal.py" --plan
+fi
+
 usage() {
 cat <<'HELP'
 Restart RIDFT after manual SCF adjustments in an existing metal folder.
 No define or input replacement. Run from the EF project directory.
 
+New universal recovery, from inside either metal/ or metal/screwer_metal/:
+  lan-recover --plan              Inspect verified next stages; no changes
+  lan-recover --submit            Submit only remaining verified stages
+  lan-recover --plan --base EF_ROOT --metal nd/screwer_nd
+  lan-recover --plan --frequency ao    When legacy frequency method is unknown
+
+Original explicit SCF recovery (unchanged):
 Usage: lan-recover [num|ao] --metal METAL [mode]   (default: no Hessian)
   No selector = stop after post-JOBEX EIGER; num = NumForce; ao = aoforce.
   Full names numforce/aoforce also accepted.

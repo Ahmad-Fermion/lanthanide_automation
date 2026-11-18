@@ -10,6 +10,8 @@ Submit TURBOMOLE lanthanide jobs on VACC (14 metals; Pm excluded).
 Run from an EF project directory containing control, coord and def.inp.
 
 Usage: lan-run [num|ao] [options]       (default: no Hessian)
+  lan-run ao --closed-shell --metals la lu     (opt-in separate *_closedshell folders)
+  lan-run --closed-shell --metals lu --prepare-only
   lan-run = geometry optimization only (no Hessian)
   num = NumForce; ao = aoforce (full names also accepted).
 
@@ -45,6 +47,15 @@ HELP
 }
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+# Dedicated restricted workflow; preserve original open-shell submission policy.
+for option in "$@"; do
+    if [[ "$option" == '--closed-shell' ]]; then
+        args=()
+        for item in "$@"; do [[ "$item" == '--closed-shell' ]] || args+=("$item"); done
+        exec python3 "$SCRIPT_DIR/closed_shell_workflow.py" "${args[@]}"
+    fi
+done
+
 base="$PWD"
 frequency='none'
 prepare_only=0

@@ -330,3 +330,119 @@ prepared child containing an older SLURM script without the pre-JOBEX RIDFT
 is rejected; inspect and update its copied script manually if appropriate.
 SLURM submissions launched from the short gate job and actual TURBOMOLE
 `screwer`/`sdg`/`kdg`/DEFINE behavior require a controlled **VACC validation**.
+
+
+## Development branch: turbomoleio integration and stage-aware recovery
+
+The experimental additions below are **not validated on VACC/TURBOMOLE 7.9**.
+Use them only on independent copies of calculations and keep your production
+installation untouched until the tests have passed. Installing into
+`$HOME/bin/lan-dev` keeps the commands separate from production.
+
+### Input inspection
+
+`lan-validate --project-only` inspects the **EF project root**; it does not
+scan metal folders. `lan-validate --include-screwer` scans existing metal
+folders and correction children. When invoked inside a metal folder it
+recognizes the enclosing EF project. Repeated result data groups like `$last`,
+`$vibrational`, and `$nprvibrational` are legitimate TURBOMOLE results and no
+longer cause false FAILs. It is strictly read-only and is **not a proof** that
+one has the correct electronic ground state.
+
+### Universal recovery (experimental)
+
+`lan-recover` retains its original `--metal ... --ridft-only|--full-chain|--continue-only`
+behavior. New **read-only by default** recovery planning works from inside a
+metal folder or its `screwer_<metal>` correction child:
+
+```
+lan-recover --plan                    # no modifications and no submissions
+lan-recover --submit                  # submit the verified stages
+lan-recover --plan --frequency ao     # for an untracked frequency method
+```
+
+From the EF root, target a folder explicitly:
+
+```
+lan-recover --plan --base "$PWD" --metal nd
+lan-recover --plan --base "$PWD" --metal nd/screwer_nd
+```
+
+The planner uses the recorded Hessian method (or requires the user to name
+it when unknown), checks SCF signatures, geometry convergence markers and
+frequency evidence, and refuses to submit if SLURM still has queued or
+running jobs in the same directory. In particular, a failed Screwer JOBEX
+resumes with `jobex_eiger` **without DEFINE**. An SCF failure after
+successful Screwer DEFINE resumes with `screwer_ridft_jobex_eiger`, which
+also skips DEFINE. Hessian failures resume the selected Hessian alone.
+
+When a JOBEX recovery starts on a compute node, it first archives existing
+`jobex.out`/failure markers in `recovery_attempts/<jobid>/`, then removes
+`not.converged` and stale geometry markers before rerunning JOBEX. Frequency
+recovery similarly archives stale frequency outputs before rerunning. No
+science files are overwritten merely by asking for a plan. If old dependent
+jobs remain PENDING after a failed parent job, inspect/cancel those obsolete
+jobs separately before using `--submit`—the tool will never cancel jobs on
+your behalf. All submitted stages are journaled, with afterok dependencies.
+
+For manual calculations without `metal.json`, **Hessian-only recovery from a
+verified converged geometry** is supported with an explicitly selected method
+(e.g., `lan-recover --plan --frequency ao`). The resumed Hessian uses the
+existing control/orbitals, with `TM_MANUAL_RECOVERY` constrained to Hessian
+stages only; the tool does not invent charge or spin metadata. Manual SCF or
+JOBEX recovery without provenance is intentionally rejected.
+
+### Opt-in restricted (closed-shell) La/Lu
+
+The whole **complex** must admit an even-electron closed-shell state; a La(III)
+or Lu(III) metal center alone is insufficient proof of that state. Provide a
+user-authored `def_closedshell.inp` at the EF project root. It must implement
+the actual *restricted* EHT dialogue in TURBOMOLE 7.9, contain one quoted
+lanthanide basis assignment to replace, and set the EF-specific molecular
+charge. It must not contain an unrestricted `u N` command. Do not simply
+rename `def.inp`—the menus differ. No such template is generated here.
+
+```
+lan-setup --closed-shell --metals la lu
+lan-run ao --closed-shell --metals lu --include-existing
+# or one-step (on previously unprepared directories)
+lan-run ao --closed-shell --metals la lu
+```
+
+This creates only `la_closedshell` and/or `lu_closedshell`, leaving the
+existing `la/` and `lu/` untouched. The original control's DFT, RI, ECP/X2CSR
+and dispersion settings remain in place, but open-shell and Fermi groups are
+removed from the **new copy**. A positive even all-electron molecular count
+is required; this is only a necessary precondition, not a multiplicity proof.
+The new pipeline has `restricted_ridft` → `jobex_eiger` → optional Hessian,
+without the open-shell occupation-removal stage. DEFINE must terminate
+normally and produce `$closed shells`, `$scfmo`, and `mos`; otherwise RIDFT
+will not start. These paths require a real VACC DEFINE test.
+
+### Opt-in adaptive Screwer supervisor
+
+The existing tested `def_screwer.inp` → `def_screwer_ln.inp` fallback remains
+the default. For **new** correction directories, one may instead prepare with:
+
+```
+lan-screwer ao --metals pr --prepare-only --define-backend adaptive
+```
+
+The prepared manifest pins the backend; submission uses the prepared choice.
+The experimental `pexpect` backend recognizes collinearity/geometry failures
+while DEFINE is running, rather than waiting for an exit status. On an error,
+the existing Screwer workflow restores the prepared files and retries the
+no-`ired` template. This is a supervised implementation of the *existing*
+user-defined menus, **not** a general replacement for initial ECP/X2CSR
+DEFINE. The `turbomoleio` library is a separately installed dependency for
+`lan-validate`; it is not vendored into this repository.
+
+### Development acceptance tests
+
+Run `python -m unittest discover -s tests -v` to exercise offline contracts.
+Before considering a merge into production, also test in fresh copies on
+VACC: La/Gd open-shell initial ECP and X2CSR, one restricted La/Lu system
+with a verified charge, Pr Screwer fallback, Screwer RIDFT/JOBEX failure,
+and Hessian-only recovery. Compare basis/ECP, occupations, method data
+groups, convergence evidence and resulting energies with reference jobs.
+No automated test can establish a unique physical electronic ground state.

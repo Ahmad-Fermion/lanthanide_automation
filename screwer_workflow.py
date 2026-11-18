@@ -177,7 +177,7 @@ def parse_coordinates(output, parent_coord):
     return '$coord\n' + '\n'.join(line for _, line in rows) + '\n$end\n'
 
 
-def prepare(base, metal, method, *, min_negative=0):
+def prepare(base, metal, method, *, min_negative=0, define_backend="legacy"):
     parent = base / metal
     if not parent.is_dir():
         raise RuntimeError(f'{parent}: no metal directory')
@@ -241,7 +241,7 @@ def prepare(base, metal, method, *, min_negative=0):
     else:
         (child / 'metal.json').write_text(json.dumps(meta, indent=2) + '\n')
     script_dir = Path(__file__).resolve().parent
-    for name in ('tm_workflow.py', 'turbo.pipeline.slurm',
+    for name in ('tm_workflow.py', 'turbo.pipeline.slurm', 'adaptive_define.py',
                  'turbo.resume.slurm', 'screwer_workflow.py', 'setup_lanthanides.py'):
         shutil.copy2(script_dir / name, child / name)
     screwer_input = (child / 'screwer.inp').read_text()
@@ -295,7 +295,7 @@ def prepare(base, metal, method, *, min_negative=0):
             'define_source': template_name, 'charge': meta.get('charge'),
             'frequency_cm1': dict(negative)[mode], 'negative_modes_first8': negative,
             'method': method, 'prepared_utc': dt.datetime.now(dt.timezone.utc).isoformat(),
-            'one_pass_only': True}
+            'one_pass_only': True, 'define_backend': define_backend}
     (child / 'screwer_prepared.json').write_text(json.dumps(info, indent=2) + '\n')
     print(f'{metal}: screwer prepared mode {mode} ({dict(negative)[mode]:g} cm^-1) in {child}', flush=True)
     return child
@@ -351,6 +351,9 @@ def run_define_with_fallback(child):
         raise RuntimeError(f'{child}: no Screwer preparation manifest')
     info = json.loads(manifest.read_text())
     metal = info.get('metal')
+    backend = info.get('define_backend', 'legacy')
+    if backend not in ('legacy', 'adaptive'):
+        raise RuntimeError(f'{manifest}: unrecognized DEFINE backend {backend!r}')
     if metal not in METALS:
         raise RuntimeError(f'{manifest}: invalid metal')
     primary = child / 'def_screwer.inp'
@@ -380,7 +383,11 @@ def run_define_with_fallback(child):
                     target.unlink()  # newly generated DEFINE input/output only
 
         def attempt(template, logfile):
-            result = execute(['define'], cwd=child, input_text=template.read_text(), timeout=None)
+            if backend == 'adaptive':
+                from adaptive_define import define_supervised
+                result = define_supervised(child, template.read_text())
+            else:
+                result = execute(['define'], cwd=child, input_text=template.read_text(), timeout=None)
             (child / logfile).write_text(result.stdout)
             try:
                 validate_screwer_define(child, result)
@@ -390,7 +397,7 @@ def run_define_with_fallback(child):
 
         first_error = attempt(primary, 'define.out')
         if first_error is None:
-            print(f'{child}: DEFINE succeeded using {primary.name}', flush=True)
+            print(f'{child}: DEFINE succeeded using {primary.name} (backend={backend})', flush=True)
             return
         print(f'WARNING {child}: {primary.name} failed: {first_error}', flush=True)
         restore()
@@ -547,6 +554,8 @@ def main():
     action.add_argument('--export-only', action='store_true', help='extract $noproj data for completed screwer corrections')
     action.add_argument('--clean-frequency', action='store_true', help=argparse.SUPPRESS)
     action.add_argument('--define-fallback', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--define-backend', choices=('legacy', 'adaptive'), default='legacy',
+                        help='experimental adaptive pexpect supervisor; pinned at preparation, legacy is default')
     parser.add_argument('--min-imag', type=float, default=0.0,
                         help='only trigger on frequencies strictly below -VALUE cm^-1 (default 0)')
     args = parser.parse_args()
@@ -576,7 +585,8 @@ def main():
             elif args.submit_prepared:
                 submit(correction_dir(base / metal, metal), method)
             else:
-                dest = prepare(base, metal, method, min_negative=args.min_imag)
+                dest = prepare(base, metal, method, min_negative=args.min_imag,
+                               define_backend=args.define_backend)
                 if dest is not None and not args.prepare_only:
                     submit(dest, method)
         except (RuntimeError, OSError, subprocess.TimeoutExpired, ValueError) as error:

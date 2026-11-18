@@ -21,7 +21,7 @@ PREPARED_FILES = {
 # New optional helpers may be present in freshly prepared folders; legacy
 # prepared folders remain valid for normal (non-screwer) submissions.
 OPTIONAL_PREPARED_FILES = {'screwer_workflow.py', 'turbo.screwer.slurm',
-                           'setup_lanthanides.py'}
+                           'setup_lanthanides.py', 'adaptive_define.py'}
 
 
 class UnsafeSubmission(Exception):

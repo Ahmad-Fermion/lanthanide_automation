@@ -102,6 +102,7 @@ def setup_one(base, metal):
         # The in-folder screwer gate imports make_define/SPIN from this helper.
         shutil.copy2(ROOT / 'setup_lanthanides.py', dest / 'setup_lanthanides.py')
         shutil.copy2(ROOT / 'screwer_workflow.py', dest / 'screwer_workflow.py')
+        shutil.copy2(ROOT / 'adaptive_define.py', dest / 'adaptive_define.py')
         shutil.copy2(ROOT / 'tm_workflow.py', dest / 'tm_workflow.py')
         (dest / 'metal.json').write_text(json.dumps({'metal': metal, 'unpaired': SPIN[metal],
                                                      'charge': charge}, indent=2) + '\n')
@@ -115,6 +116,12 @@ def setup_one(base, metal):
 
 
 def main():
+    if '--closed-shell' in sys.argv[1:]:
+        raw = [x for x in sys.argv[1:] if x != '--closed-shell']
+        if '--prepare-only' not in raw:
+            raw.append('--prepare-only')
+        from closed_shell_workflow import main as closed_main
+        return closed_main(raw)
     ap = argparse.ArgumentParser(
         description='Prepare lanthanide folders (14 metals, excluding Pm); do not submit jobs.',
         epilog=(

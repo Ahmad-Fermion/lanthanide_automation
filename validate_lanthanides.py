@@ -15,6 +15,9 @@ import sys
 from setup_lanthanides import SPIN, make_coord, make_control, make_define, read_charge
 
 GROUP_RE = re.compile(r'(?m)^\s*\$([A-Za-z][\w-]*)\b')
+# TURBOMOLE may append repeated result groups during optimizations/Hessians.
+# Duplicate output records are not invalid initialization inputs.
+REPEATABLE_OUTPUT = {'last', 'vibrational', 'nprvibrational'}
 FILE_RE = re.compile(r'\bfile\s*=\s*([^\s]+)', re.I)
 NUMERIC_RE = re.compile(r'^[+-]?\d+$')
 SCIENTIFIC_FLAGS = ('disp4', 'noproj', 'rij', 'scfdiis', 'uhf')
@@ -60,7 +63,7 @@ def read_control(directory, report, Control):
             report.error('control has no terminating $end')
         names = [m.group(1).lower() for m in GROUP_RE.finditer(source)]
         for name in set(names):
-            if name != 'end' and names.count(name) > 1:
+            if name not in REPEATABLE_OUTPUT and name != 'end' and names.count(name) > 1:
                 report.error(f'duplicate ${name} data group')
         return Control.from_file(str(path))
     except Exception as exc:
@@ -340,6 +343,9 @@ def main(argv=None):
               f'(details: {exc})', file=sys.stderr)
         return 2
     base = args.base.resolve()
+    # From a metal/ folder, use the containing EF project automatically.
+    if (base.name in SPIN or base.name.endswith('_closedshell')) and (base.parent / 'def.inp').is_file():
+        base = base.parent
     metals = args.metals if args.metals is not None else [m for m in SPIN if (base / m).is_dir()]
     if args.project_only:
         metals = args.metals if args.metals is not None else list(SPIN)
