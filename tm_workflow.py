@@ -191,7 +191,8 @@ def screwer_inheritance(directory):
     if not shells:
         raise RuntimeError(f'{directory}: missing inherited shell occupations')
     if re.search(r'(?im)^[ \t]*\$fermi\b', control):
-        raise RuntimeError(f'{directory}: $fermi unexpectedly present; inspect before screwer continuation')
+        print(f'WARNING {directory}: inherited $fermi retained as configured; '
+              'verify intended SCF smearing and occupations', flush=True)
     return {'orbitals_sha256': orbitals, 'shell_groups': shells}
 
 

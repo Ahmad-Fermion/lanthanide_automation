@@ -9,6 +9,7 @@ from unittest import mock
 
 import recover_universal as recovery
 import screwer_workflow as screwer
+import tm_workflow as tm
 from test_development_workflows import populate
 
 
@@ -91,6 +92,95 @@ class ScrewerCoordinateTests(unittest.TestCase):
                               '$redundant\n 1 k 1.0 tors 1 2 1 2\n$end\n')
             with self.assertRaisesRegex(RuntimeError, 'atom count and order'):
                 screwer.parse_coordinates(' 0 0 0 nd\n 1 1 1 h\n', parent)
+
+
+class ScrewerFermiTests(unittest.TestCase):
+    def test_inherited_fermi_warns_but_retains_orbitals_and_shells(self):
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            (root / 'alpha').write_text('$uhfmo_alpha\n 1 a eigenvalue=-1.0\n$end\n')
+            (root / 'beta').write_text('$uhfmo_beta\n 1 a eigenvalue=-1.0\n$end\n')
+            control = ('$uhf\n$alpha shells\n a 1-124 (1)\n'
+                       '$beta shells\n a 1-117 (1)\n'
+                       '$fermi tmstrt= 1000.00 tmend=100.00 nue= 3.00\n$end\n')
+            (root / 'control').write_text(control)
+            with contextlib.redirect_stdout(io.StringIO()) as stdout:
+                result = tm.screwer_inheritance(root)
+            self.assertIn('WARNING', stdout.getvalue())
+            self.assertIn('$fermi', stdout.getvalue())
+            self.assertEqual({'alpha', 'beta'}, set(result['orbitals_sha256']))
+            self.assertEqual(2, len(result['shell_groups']))
+            self.assertEqual(control, (root / 'control').read_text())
+
+    def test_no_fermi_emits_no_warning(self):
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            (root / 'mos').write_text('$scfmo\n 1 a eigenvalue=-1.0\n$end\n')
+            (root / 'control').write_text('$closed shells\n a 1-3 (2)\n$end\n')
+            with contextlib.redirect_stdout(io.StringIO()) as stdout:
+                result = tm.screwer_inheritance(root)
+            self.assertNotIn('WARNING', stdout.getvalue())
+            self.assertEqual({'mos'}, set(result['orbitals_sha256']))
+
+    def test_second_cycle_preparation_with_user_fermi_writes_manifest(self):
+        # Exercise the actual prepare -> cpc -> screwer -> sdg -> kdg ->
+        # inheritance -> preparation-record path using stand-in executables.
+        from types import SimpleNamespace
+        import shutil
+        with tempfile.TemporaryDirectory() as t:
+            base = Path(t)
+            parent = screwer.cycle_directory(base, 'nd', 1)
+            parent.mkdir(parents=True)
+            (base / 'def_screwer.inp').write_text('a coord\n*\nno\nq\n')
+            (base / 'def_screwer_ln.inp').write_text('a coord\n*\nno\nq\n')
+            (base / 'screwer.inp').write_text('1\n')
+            (parent / 'metal.json').write_text(json.dumps(dict(metal='nd', charge=-1, unpaired=3)))
+            (parent / 'control').write_text(
+                '$alpha shells\n a 1-124 (1)\n$beta shells\n a 1-117 (1)\n'
+                '$fermi tmstrt=1000 nue=3.00\n$end\n')
+            (parent / 'coord').write_text('$coord\n 0 0 0 nd\n 1 1 1 o\n$end\n')
+            (parent / 'alpha').write_text('$uhfmo_alpha\n1 a eigenvalue=-1.0\n$end\n')
+            (parent / 'beta').write_text('$uhfmo_beta\n1 a eigenvalue=-1.0\n$end\n')
+
+            def simulate(command, *, cwd, input_text=None, timeout=180):
+                if command[0] == 'cpc':
+                    child = cwd / command[1]
+                    child.mkdir()
+                    for path in cwd.iterdir():
+                        if path.is_file():
+                            shutil.copy2(path, child / path.name)
+                    return SimpleNamespace(returncode=0, stdout='')
+                if command[0] == 'screwer':
+                    control = cwd / 'control'
+                    ctl = control.read_text()
+                    control.write_text(ctl + '\n$newcoord\n'
+                                       '# cartesian coordinates shifted along normal mode 1 by 0.1\n'
+                                       ' 0 0 0 nd\n 1 1 1 o\n$end\n')
+                    return SimpleNamespace(returncode=0, stdout='screwer complete')
+                if command[:3] == ['sdg', '-b', 'newcoord']:
+                    return SimpleNamespace(returncode=0,
+                        stdout='# shifted along normal mode 1\n 0 0 0 nd\n 1 1 1 o\n')
+                if command[0] == 'kdg':
+                    return SimpleNamespace(returncode=0, stdout='')
+                raise AssertionError(f'unexpected command: {command}')
+
+            with mock.patch.object(screwer, 'verify_parent', return_value='automation'), \
+                 mock.patch.object(screwer, 'spectrum_modes', return_value=[(1, -15.93)]), \
+                 mock.patch.object(screwer, 'execute', side_effect=simulate), \
+                 mock.patch.object(screwer.shutil, 'which', return_value='/fake/bin'), \
+                 contextlib.redirect_stdout(io.StringIO()) as stdout:
+                child = screwer.prepare(base, 'nd', 'aoforce', cycle=2, max_cycles=2)
+            self.assertTrue((child / 'screwer_prepared.json').is_file())
+            self.assertIn('$fermi', (child / 'control').read_text())
+            self.assertIn('WARNING', stdout.getvalue())
+            self.assertEqual(2, json.loads((child / 'screwer_prepared.json').read_text())['cycle'])
+
+    def test_fermi_does_not_bypass_missing_orbitals(self):
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            (root / 'control').write_text('$alpha shells\n a 1-3 (1)\n$fermi nue=3\n$end\n')
+            with self.assertRaisesRegex(RuntimeError, 'orbital files missing'):
+                tm.screwer_inheritance(root)
 
 
 class AdditionalCyclesTests(unittest.TestCase):
