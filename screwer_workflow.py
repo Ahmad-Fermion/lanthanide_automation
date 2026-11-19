@@ -189,11 +189,21 @@ def parse_coordinates(output, parent_coord):
         if not re.fullmatch(r'[A-Za-z]{1,3}', fields[3]):
             raise RuntimeError(f'newcoord has invalid atom label: {line!r}')
         rows.append((fields[3].lower(), line))
+    # A TURBOMOLE coord file may also contain $redundant and other data groups.
+    # Only atom records inside $coord belong in the atom-order comparison.
     orig = []
+    in_coord = False
     for line in parent_coord.read_text().splitlines():
-        fields = line.split()
-        if len(fields) >= 4 and not line.lstrip().startswith(('$', '#')):
-            orig.append(fields[3].lower())
+        stripped = line.strip()
+        if stripped.startswith('$coord'):
+            in_coord = True
+            continue
+        if in_coord and stripped.startswith('$'):
+            break
+        if in_coord and stripped and not stripped.startswith('#'):
+            fields = stripped.split()
+            if len(fields) >= 4:
+                orig.append(fields[3].lower())
     if not orig or [row[0] for row in rows] != orig:
         raise RuntimeError('displaced coordinates do not match the original atom count and order')
     return '$coord\n' + '\n'.join(line for _, line in rows) + '\n$end\n'

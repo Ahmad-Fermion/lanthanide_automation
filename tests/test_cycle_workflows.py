@@ -69,6 +69,30 @@ class ScrewerCoordinateTests(unittest.TestCase):
             self.assertEqual('c', result.splitlines()[1].split()[3])
 
 
+    def test_parent_coord_redundant_group_is_not_atom_data(self):
+        # TURBOMOLE's coord can contain thousands of non-Cartesian lines
+        # after $coord; these must not become apparent extra "atoms".
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp) / 'coord'
+            atoms = ['    0.0 0.0 0.0  h', '    1.0 2.0 3.0  nd']
+            parent.write_text('$coord\n' + '\n'.join(atoms) +
+                              '\n$user-defined bonds\n$redundant\n'
+                              '    1 k 1.00000 stre 1 2 val=1.0\n'
+                              '    2 k 1.00000 tors 1 2 1 2 val=2.0\n$end\n')
+            displaced = '# cartesian coordinates shifted\n' + '\n'.join(atoms)
+            result = screwer.parse_coordinates(displaced, parent)
+            self.assertEqual(2, len(result.splitlines()) - 2)
+            self.assertIn(' nd\n', result)
+
+    def test_parent_coord_redundant_group_still_rejects_wrong_atom_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp) / 'coord'
+            parent.write_text('$coord\n 0 0 0 h\n 1 1 1 nd\n'
+                              '$redundant\n 1 k 1.0 tors 1 2 1 2\n$end\n')
+            with self.assertRaisesRegex(RuntimeError, 'atom count and order'):
+                screwer.parse_coordinates(' 0 0 0 nd\n 1 1 1 h\n', parent)
+
+
 class AdditionalCyclesTests(unittest.TestCase):
     def test_automatic_cap_and_no_negative_modes_are_noops(self):
         with tempfile.TemporaryDirectory() as t:
