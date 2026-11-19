@@ -55,6 +55,20 @@ class RecoveryPlanTests(unittest.TestCase):
             self.assertEqual(path.resolve(), recovery.identify(base, base, 'lu/screwer_lu/screwer_lu_cycle2/screwer_lu_cycle3')[0])
 
 
+class ScrewerCoordinateTests(unittest.TestCase):
+    def test_parent_coord_screwer_comment_is_not_an_atom(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp) / 'coord'
+            atoms = [f'    {i}.0 0.0 0.0  c' for i in range(56)]
+            parent.write_text('$coord\n# cartesian coordinates shifted along normal mode 1 by *******\n'
+                              + '\n'.join(atoms) + '\n$end\n')
+            displaced = '# cartesian coordinates shifted along normal mode 1 by *******\n' + '\n'.join(atoms)
+            result = screwer.parse_coordinates(displaced, parent)
+            self.assertTrue(result.startswith('$coord\n'))
+            self.assertEqual(56, len(result.splitlines()) - 2)
+            self.assertEqual('c', result.splitlines()[1].split()[3])
+
+
 class AdditionalCyclesTests(unittest.TestCase):
     def test_automatic_cap_and_no_negative_modes_are_noops(self):
         with tempfile.TemporaryDirectory() as t:

@@ -192,7 +192,7 @@ def parse_coordinates(output, parent_coord):
     orig = []
     for line in parent_coord.read_text().splitlines():
         fields = line.split()
-        if len(fields) >= 4 and fields[0] != '$coord' and not line.lstrip().startswith('$'):
+        if len(fields) >= 4 and not line.lstrip().startswith(('$', '#')):
             orig.append(fields[3].lower())
     if not orig or [row[0] for row in rows] != orig:
         raise RuntimeError('displaced coordinates do not match the original atom count and order')
