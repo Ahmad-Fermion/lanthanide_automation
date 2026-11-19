@@ -140,6 +140,38 @@ class ClosedShellTests(unittest.TestCase):
 
 
 class UniversalRecoveryTests(unittest.TestCase):
+    def test_resume_post_occupation_fix_starts_integer_ridft_not_second_remove_fermi(self):
+        # Reproduces EF1741: ridft_eiger_fix already removed $fermi,
+        # subsequent recovery mistakenly called remove-fermi a second time.
+        with tempfile.TemporaryDirectory() as t:
+            folder = populate(Path(t), metal='la', method='numforce')
+            (folder / 'ridft.out').write_text(SCF_OK)
+            (folder / 'initial_occupations').write_text('$alpha shells\n a 1-2 (1)\n$beta shells\n a 1-2 (1)\n')
+            (folder / 'control').write_text('$dft\n functional tpssh\n$alpha shells\n a 1-2 (1)\n$beta shells\n a 1-2 (1)\n$end\n')
+            (folder / 'control.with_fermi').write_text('$dft\n functional tpssh\n$fermi nue=0.00\n$alpha shells\n a 1-2 (1)\n$beta shells\n a 1-2 (1)\n$end\n')
+            control_before = (folder / 'control').read_bytes()
+            stages, reason = recovery.stage_plan(folder, 'standard', 'numforce')
+            self.assertEqual(['integer_ridft', 'jobex_eiger', 'numforce'], stages)
+            self.assertIn('$fermi already removed', reason)
+            self.assertEqual(control_before, (folder / 'control').read_bytes())
+
+    def test_fermi_present_still_runs_occupation_fix(self):
+        with tempfile.TemporaryDirectory() as t:
+            folder = populate(Path(t), method='numforce')
+            (folder / 'initial_occupations').write_text('saved occupied shells')
+            (folder / 'ridft.out').write_text(SCF_OK)
+            (folder / 'control').write_text('$fermi nue=3.00\n$end\n')
+            stages, _ = recovery.stage_plan(folder, 'standard', 'numforce')
+            self.assertEqual(['eiger_fix_integer_ridft', 'jobex_eiger', 'numforce'], stages)
+
+    def test_missing_fermi_without_saved_prior_control_requires_review(self):
+        with tempfile.TemporaryDirectory() as t:
+            folder = populate(Path(t), method='numforce')
+            (folder / 'initial_occupations').write_text('saved occupied shells')
+            (folder / 'ridft.out').write_text(SCF_OK)
+            with self.assertRaisesRegex(recovery.RecoveryError, 'control.with_fermi'):
+                recovery.stage_plan(folder, 'standard', 'numforce')
+
     def test_standard_jobex_failure_skips_completed_scf(self):
         with tempfile.TemporaryDirectory() as t:
             folder = populate(Path(t))

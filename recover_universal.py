@@ -142,6 +142,24 @@ def selected_method(folder, kind, requested):
     return chosen
 
 
+def integer_scf_prepared(folder):
+    """Recognize the already-completed occupation fix after ridft_eiger_fix.
+
+    An initial run of ridft_eiger_fix removes $fermi before finishing. Recovery
+    must not run that non-idempotent step again. Require the saved pre-removal
+    control as evidence rather than inferring readiness from a missing group.
+    This is read-only: never overwrite manually edited SCF settings.
+    """
+    control = text(folder / 'control')
+    if re.search(r'(?m)^[ \t]*\$fermi\b', control, re.I):
+        return False
+    previous = folder / 'control.with_fermi'
+    if not previous.is_file() or not re.search(r'(?m)^[ \t]*\$fermi\b', text(previous), re.I):
+        raise RecoveryError('control has no $fermi, but control.with_fermi does not verify '
+                            'the occupation fix; inspect the control before resuming integer SCF')
+    return True
+
+
 def verified_legacy_resume(folder):
     marker = folder / 'ridft.resume.ok'
     if not marker.is_file():
@@ -216,8 +234,13 @@ def stage_plan(folder, kind, method):
         raise RecoveryError('initial_occupations missing; cannot safely restore the original open-shell state')
     if (scf_ok(folder / 'ridft.out') or scf_ok(folder / 'ridft.retry.out') or
             any(scf_ok(p) for p in folder.glob('ridft.resume.*.out')) or verified_legacy_resume(folder)):
-        stages = ['eiger_fix_integer_ridft', 'jobex_eiger']
-        return stages + ([method] if method != 'none' else []), 'initial SCF converged; restart integer-SCF stage'
+        if integer_scf_prepared(folder):
+            stages = ['integer_ridft', 'jobex_eiger']
+            reason = 'initial SCF converged; $fermi already removed; resume integer SCF without repeating EIGER/occupation fix'
+        else:
+            stages = ['eiger_fix_integer_ridft', 'jobex_eiger']
+            reason = 'initial SCF converged; perform occupation fix then integer SCF'
+        return stages + ([method] if method != 'none' else []), reason
     if not (folder / 'define_setup.ok').is_file():
         raise RecoveryError('initial DEFINE not verified; manual inspection required')
     return ['ridft-recovery', 'eiger_fix_integer_ridft', 'jobex_eiger'] + ([method] if method != 'none' else []), 'restart initial SCF without rerunning DEFINE'
@@ -278,7 +301,7 @@ def submit(folder, metal, kind, method, stages, script_root):
             cpus = os.environ.get('TM_CPUS', '20')
             if not cpus.isdecimal() or int(cpus) < 1:
                 raise RecoveryError('invalid TM_CPUS')
-            memory = os.environ.get('HESS_MEM' if stage in ('numforce', 'aoforce') else 'RIDFT_MEM' if stage in ('ridft-recovery', 'eiger_fix_integer_ridft', 'restricted_ridft_no_define') else 'JOBEX_MEM',
+            memory = os.environ.get('HESS_MEM' if stage in ('numforce', 'aoforce') else 'RIDFT_MEM' if stage in ('ridft-recovery', 'integer_ridft', 'eiger_fix_integer_ridft', 'restricted_ridft_no_define') else 'JOBEX_MEM',
                                     '100G' if stage in ('numforce', 'aoforce') else '20G')
             script = 'turbo.resume.slurm' if stage == 'ridft-recovery' else 'turbo.pipeline.slurm'
             script_path = script_root / script
