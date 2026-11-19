@@ -7,7 +7,10 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 
 HERE = Path.cwd()
 META = HERE / 'metal.json'
@@ -206,6 +209,99 @@ def check_screwer_define():
     record('DEFINE', 'OK', 'Screwer DEFINE finished; no orbital/control comparison')
 
 
+
+# Initial Ln DEFINE may fail when ired tries to construct redundant internal
+# coordinates for a changed metal. Unlike Screwer, these are fresh inputs;
+# retain the metal-specific orbital, EHT, basis and relativistic instructions.
+INITIAL_DEFINE_OUTPUTS = ('control', 'coord', 'basis', 'auxbasis', 'alpha', 'beta',
+                          'mos', 'statistics', 'intdef', 'wherefrom', 'gradient',
+                          'energy', 'hessapprox', 'job.start', 'job.last')
+IREDS_COORD_MENU = re.compile(
+    r'(?im)^([ \t]*a[ \t]+coord[ \t]*\r?\n)[ \t]*ired[ \t]*\r?\n[ \t]*\*[ \t]*(?:\r?\n|$)')
+
+
+def initial_noired_transcript(script):
+    """Replace precisely the geometry menu path; never rewrite chemistry menus.
+
+    DEFINE's no-ired route needs BOTH the geometry terminator '*' and the
+    subsequent 'no'. Simply deleting 'ired' shifts all subsequent answers.
+    """
+    revised, count = IREDS_COORD_MENU.subn(lambda m: m.group(1) + '*\nno\n', script)
+    if count > 1:
+        raise RuntimeError('multiple a coord / ired / * sections; cannot choose a safe retry')
+    return revised if count == 1 else None
+
+
+def run_initial_define():
+    """Run an initial DEFINE transcript; retry cleanly without ired if it fails.
+
+    The original def.inp stays authoritative and is never changed. A retry
+    starts from a snapshot of the PRE-DEFINE inputs, never the failed control.
+    Successful DEFINE is still checked by `check-define` before SCF.
+    """
+    source = HERE / 'def.inp'
+    if not source.is_file() or not source.stat().st_size:
+        raise RuntimeError(f'{source}: missing or empty DEFINE transcript')
+    script = source.read_text()
+    noired = initial_noired_transcript(script)
+
+    def attempt(input_text, filename):
+        result = subprocess.run(['define'], cwd=HERE, input=input_text,
+                                text=True, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, check=False)
+        (HERE / filename).write_text(result.stdout)
+        success = (result.returncode == 0 and
+                   re.search(r'(?i)define\s*:\s*all\s+done|define\s+ended\s+normally',
+                             result.stdout) is not None and
+                   all((HERE / n).is_file() and (HERE / n).stat().st_size
+                       for n in ('control', 'coord', 'basis', 'auxbasis')))
+        return success, result.returncode
+
+    # Templates already using 'a coord / * / no' run once as before.
+    if noired is None:
+        ok, code = attempt(script, 'define.out')
+        if not ok:
+            raise RuntimeError(f'initial DEFINE failed (exit {code}); no recognized '
+                               'a coord / ired / * menu path for retry; see define.out')
+        return
+
+    with tempfile.TemporaryDirectory(prefix='.initial_define_snapshot_', dir=HERE) as temp:
+        backup = Path(temp)
+        present = set()
+        for name in INITIAL_DEFINE_OUTPUTS:
+            item = HERE / name
+            if item.is_symlink():
+                raise RuntimeError(f'{item}: cannot safely snapshot a symlink')
+            if item.is_file():
+                shutil.copy2(item, backup / name)
+                present.add(name)
+
+        def restore():
+            for name in INITIAL_DEFINE_OUTPUTS:
+                target = HERE / name
+                if target.is_symlink():
+                    raise RuntimeError(f'{target}: cannot safely restore a symlink')
+                if name in present:
+                    shutil.copy2(backup / name, target)
+                elif target.is_file():
+                    target.unlink()
+
+        ok, code = attempt(script, 'define.out')
+        if ok:
+            print('Initial DEFINE succeeded with original input', flush=True)
+            return
+        print(f'WARNING initial DEFINE failed (exit {code}); '
+              'retrying without ired from original inputs', flush=True)
+        restore()
+        (HERE / 'def.noired.generated.inp').write_text(noired)
+        ok, code = attempt(noired, 'define.noired.out')
+        if not ok:
+            restore()
+            raise RuntimeError(f'initial DEFINE and no-ired fallback both failed '
+                               f'(fallback exit {code}); prepared inputs restored; '
+                               'see define.out and define.noired.out')
+        print('Initial DEFINE fallback succeeded (a coord / * / no)', flush=True)
+
 def check_define():
     """Verify DEFINE ran against the sole control file; never rewrite its output."""
     meta = metadata()
@@ -376,6 +472,7 @@ def main():
     sub = ap.add_subparsers(dest='command', required=True, help='stage helper action')
     sub.add_parser('check-restricted-define', help='verify restricted molecular orbitals and $closed shells')
     sub.add_parser('check-define', help='verify files and $fermi nue after define without rewriting control')
+    sub.add_parser('run-initial-define', help='run initial DEFINE with a clean no-ired retry when needed')
     sub.add_parser('check-screwer-define', help='legacy nonblocking Screwer DEFINE completion record')
     sub.add_parser('remove-fermi', help='save control.with_fermi, restore define occupations and remove $fermi before integer SCF')
     sub.add_parser('restore-occupations', help='restore define occupations after integer SCF if changed (before jobex)')
@@ -388,6 +485,7 @@ def main():
     try:
         if args.command == 'check-restricted-define': check_restricted_define()
         elif args.command == 'check-define': check_define()
+        elif args.command == 'run-initial-define': run_initial_define()
         elif args.command == 'check-screwer-define': check_screwer_define()
         elif args.command == 'remove-fermi': remove_fermi()
         elif args.command == 'restore-occupations': restore_after_integer_scf()

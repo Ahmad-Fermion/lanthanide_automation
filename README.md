@@ -510,3 +510,31 @@ do not invalidate an otherwise successful Hessian. This feature is
 
 Universal recovery now recognizes nested Screwer cycles as well; it still
 never re-runs Screwer displacement or DEFINE automatically.
+
+
+### Initial DEFINE: general no-`ired` retry (development)
+
+For new standard Ln metal folders, the batch workflow runs the original
+metal-specific `def.inp` first. If it fails and contains the geometry menu
+sequence `a coord` / `ired` / `*`, it restores the pre-DEFINE inputs and retries
+by replacing only that sequence with `a coord` / `*` / `no`. The remainder of
+`def.inp` (basis/ECP/X2CSR, EHT charge, spin and special Gd responses) is
+unchanged, and the original `def.inp` is never edited. The two attempts are
+logged separately in `define.out` and `define.noired.out`. The derived transcript
+is retained as `def.noired.generated.inp` for inspection. If both fail, the
+pre-DEFINE files are restored and no SCF begins. When a transcript already uses
+the no-`ired` route, it is executed once without modification.
+
+This must be tested on a new development metal folder on VACC before merging
+into production. It does not replace the existing Screwer continuation fallback.
+
+
+### Replacing an existing Screwer preparation
+
+`lan-screwer ao --metals nd --cycle 2 --prepare-only --overwrite-prepared`
+replaces the existing correction directory directly (no automatic archives)
+only if no SLURM job is using it and no submission lock is pending. In an
+interactive terminal without this option, `lan-screwer` asks `[y/N]`; in a
+noninteractive run it requires the explicit option. The completed parent
+calculation is never deleted. This is opt-in, so auto-chained correction cycles
+retain their previous behavior.

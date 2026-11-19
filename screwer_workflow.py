@@ -209,7 +209,34 @@ def parse_coordinates(output, parent_coord):
     return '$coord\n' + '\n'.join(line for _, line in rows) + '\n$end\n'
 
 
-def prepare(base, metal, method, *, min_negative=0, define_backend="legacy", cycle=1, max_cycles=1):
+def replace_prepared_child(child, parent, *, force=False):
+    """Discard a correction copy on explicit opt-in; never touch an active job."""
+    if not child.exists() and not child.is_symlink():
+        return
+    if child.is_symlink() or not child.is_dir() or child.parent.resolve() != parent.resolve():
+        raise RuntimeError(f'{child}: existing correction path is not a direct, real directory')
+    if not force:
+        if not sys.stdin.isatty():
+            raise RuntimeError(f'{child}: correction directory already exists; '
+                               'rerun with --overwrite-prepared to replace it')
+        reply = input(f'{child}: replace existing correction directory? [y/N] ').strip().lower()
+        if reply not in ('y', 'yes'):
+            raise RuntimeError(f'{child}: existing directory left untouched')
+    if (child / '.lan_submission_lock').exists() or (child / '.lan_submission_pending').exists():
+        raise RuntimeError(f'{child}: pending/locked submission; cannot overwrite')
+    if shutil.which('squeue') is None:
+        raise RuntimeError('squeue unavailable: cannot rule out active calculations')
+    queue = execute(['squeue', '-h', '-u', os.environ.get('USER', ''), '-o', '%i|%Z'], cwd=parent)
+    if queue.returncode:
+        raise RuntimeError(f'squeue failed: {queue.stdout.strip()}')
+    if any(row.partition('|')[2].strip() == str(child.resolve())
+           for row in queue.stdout.splitlines() if '|' in row):
+        raise RuntimeError(f'{child}: active/pending SLURM job found; cannot overwrite')
+    shutil.rmtree(child)
+    print(f'{child}: replaced prior correction directory at user request', flush=True)
+
+
+def prepare(base, metal, method, *, min_negative=0, define_backend="legacy", cycle=1, max_cycles=1, overwrite_prepared=False):
     if not (1 <= cycle <= max_cycles <= 10):
         raise RuntimeError('require 1 <= cycle <= max_cycles <= 10')
     parent = cycle_parent(base, metal, cycle)
@@ -244,8 +271,8 @@ def prepare(base, metal, method, *, min_negative=0, define_backend="legacy", cyc
         print(f'WARNING {metal}: no metal.json; child metadata will not infer '
               'charge or spin from the Screwer DEFINE template', flush=True)
     child = correction_dir(parent, metal, cycle)
-    if child.exists():
-        raise RuntimeError(f'{child}: correction directory already exists; left untouched')
+    if child.exists() or child.is_symlink():
+        replace_prepared_child(child, parent, force=overwrite_prepared)
     if legacy_dir(parent).exists():
         print(f'NOTE {metal}: preserving existing legacy {legacy_dir(parent)}', flush=True)
     if not shutil.which('cpc') or not shutil.which('screwer') or not shutil.which('sdg') or not shutil.which('kdg'):
@@ -655,11 +682,15 @@ def main():
     action.add_argument('--advance-cycle', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--define-backend', choices=('legacy', 'adaptive'), default='legacy',
                         help='experimental adaptive pexpect supervisor; pinned at preparation, legacy is default')
+    parser.add_argument('--overwrite-prepared', action='store_true',
+                        help='replace an existing Screwer preparation if no job is using it')
     parser.add_argument('--min-imag', type=float, default=0.0,
                         help='only trigger on frequencies strictly below -VALUE cm^-1 (default 0)')
     args = parser.parse_args()
     if not (0 <= args.min_imag < float('inf')):
         parser.error('--min-imag must be a finite nonnegative number')
+    if args.overwrite_prepared and (args.submit_prepared or args.export_only or args.clean_frequency or args.advance_cycle):
+        parser.error('--overwrite-prepared is only valid when creating a new correction')
     if args.define_fallback:
         try:
             run_define_with_fallback(Path.cwd())
@@ -710,7 +741,7 @@ def main():
             else:
                 dest = prepare(base, metal, method, min_negative=args.min_imag,
                                define_backend=args.define_backend, cycle=args.cycle,
-                               max_cycles=maximum)
+                               max_cycles=maximum, overwrite_prepared=args.overwrite_prepared)
                 if dest is not None and not args.prepare_only:
                     submit(dest, method)
         except (RuntimeError, OSError, subprocess.TimeoutExpired, ValueError) as error:

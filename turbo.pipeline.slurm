@@ -132,8 +132,13 @@ case "$stage" in
             define_input='def_screwer.inp'
         fi
         [[ -f "$define_input" ]] || { echo "ERROR: $define_input missing" >&2; exit 1; }
-        python3 tm_workflow.py record DEFINE RUNNING "define < $define_input"
-        define < "$define_input"
+        python3 tm_workflow.py record DEFINE RUNNING "initial DEFINE with no-ired fallback if needed"
+        if [[ "${TM_SCREWER_CHILD:-0}" == 1 ]]; then
+            # Legacy branch retained for older initial Screwer callers.
+            define < "$define_input" > define.out 2>&1
+        else
+            python3 tm_workflow.py run-initial-define
+        fi
         python3 tm_workflow.py check-define
 
         actual -r
