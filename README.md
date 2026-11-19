@@ -126,6 +126,31 @@ submission blocking. Offline unit tests run with
 A real TURBOMOLE 7.9/VACC integration test is required before relying on its
 PASS result for production submission decisions.
 
+
+### Adaptive Screwer DEFINE: Python on compute nodes
+
+`lan-screwer --define-backend adaptive` requires `pexpect`. On VACC,
+`module load turbomole/7.9` selects a separate TURBOMOLE Python interpreter,
+which may not have `pexpect` installed. When submitting an *adaptive* Screwer
+cycle, `lan-screwer` now checks the Python interpreter used by the submitter,
+then passes its absolute path as `TM_WORKFLOW_PYTHON` to the SLURM jobs. The
+batch script uses that interpreter for adaptive DEFINE after module loading;
+other workflow helpers and normal/legacy submissions continue to use the
+existing module Python.
+
+Activate your development environment when submitting adaptive Screwer jobs:
+
+```bash
+source ~/venvs/lan-dev/bin/activate
+~/bin/lan-dev/lan-screwer ao --metals pr --define-backend adaptive --prepare-only
+~/bin/lan-dev/lan-screwer ao --metals pr --submit-prepared
+```
+
+For an alternative environment, set `TM_WORKFLOW_PYTHON` to an absolute path
+to an executable Python with `pexpect` installed. Submission checks that the
+selected interpreter can import `pexpect` **before** scheduling either job.
+This does not modify `control`, SCF settings, or DEFINE templates.
+
 ## Monitoring calculations
 
 ```bash

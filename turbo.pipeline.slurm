@@ -25,6 +25,20 @@ fi
 set -u
 ulimit -s unlimited
 
+# The module's default Python remains in use for ordinary workflow stages.
+# Adaptive Screwer DEFINE alone can use a pinned interpreter with pexpect.
+DEFINE_PYTHON_BIN="${TM_WORKFLOW_PYTHON:-python3}"
+if [[ -n "${TM_WORKFLOW_PYTHON:-}" ]]; then
+    if [[ "$DEFINE_PYTHON_BIN" != /* || ! -x "$DEFINE_PYTHON_BIN" ]]; then
+        echo "ERROR: TM_WORKFLOW_PYTHON must be an absolute executable path: $DEFINE_PYTHON_BIN" >&2
+        exit 2
+    fi
+    if ! "$DEFINE_PYTHON_BIN" -c 'import pexpect'; then
+        echo "ERROR: selected DEFINE Python cannot import pexpect: $DEFINE_PYTHON_BIN" >&2
+        exit 2
+    fi
+fi
+
 # VERIFIED VACC NumForce/OpenMP settings -- do not change this configuration.
 unset PARA_ARCH TM_PAR_OMP TM_PAR_FORK SMP SMPCPUS HOSTS_FILE
 export PATH="$TURBODIR/bin/em64t-unknown-linux-gnu:$TURBODIR/scripts:$PATH"
@@ -191,7 +205,7 @@ case "$stage" in
         if [[ "$stage" == screwer_jobex_eiger ]]; then
         active_stage=define_screwer
         python3 tm_workflow.py record DEFINE RUNNING 'Screwer DEFINE with no-ired fallback on failure'
-        python3 screwer_workflow.py --define-fallback
+        "$DEFINE_PYTHON_BIN" screwer_workflow.py --define-fallback
         python3 tm_workflow.py record DEFINE OK 'Screwer DEFINE validated; continuing without orbital/control comparison'
         else
             # Recovery must not execute Screwer displacement or DEFINE again.

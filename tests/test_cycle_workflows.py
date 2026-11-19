@@ -2,7 +2,9 @@
 import contextlib
 import io
 import json
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 import tempfile
 import unittest
 from unittest import mock
@@ -181,6 +183,89 @@ class ScrewerFermiTests(unittest.TestCase):
             (root / 'control').write_text('$alpha shells\n a 1-3 (1)\n$fermi nue=3\n$end\n')
             with self.assertRaisesRegex(RuntimeError, 'orbital files missing'):
                 tm.screwer_inheritance(root)
+
+
+class AdaptiveComputePythonTests(unittest.TestCase):
+    def prepared_child(self, base, backend='adaptive'):
+        child = base / 'pr' / 'screwer_pr'
+        child.mkdir(parents=True)
+        (child / 'screwer_prepared.json').write_text(json.dumps(dict(
+            metal='pr', method='aoforce', workflow_version=2,
+            inherited_state=True, define_backend=backend,
+        )))
+        for name in ('control', 'coord', 'def_screwer.inp',
+                     'tm_workflow.py', 'setup_lanthanides.py'):
+            (child / name).write_text('test\n')
+        (child / 'turbo.pipeline.slurm').write_text(
+            'screwer continuation SCF before JOBEX\n--define-fallback\n'
+        )
+        return child
+
+    def test_adaptive_submission_exports_absolute_python_to_both_jobs(self):
+        with tempfile.TemporaryDirectory() as t:
+            child = self.prepared_child(Path(t))
+            calls = []
+
+            def fake_execute(command, *, cwd, **kwargs):
+                self.assertEqual(child, cwd)
+                calls.append(command)
+                if command[0] == 'sbatch':
+                    return SimpleNamespace(returncode=0, stdout=str(7700000 + len(calls)))
+                return SimpleNamespace(returncode=0, stdout='')
+
+            with mock.patch.object(screwer, 'execute', side_effect=fake_execute), \
+                 mock.patch.object(screwer.shutil, 'which', return_value='/usr/bin/sbatch'), \
+                 mock.patch.dict(screwer.os.environ, {'TM_WORKFLOW_PYTHON': sys.executable}):
+                self.assertEqual(2, screwer.submit(child, 'aoforce'))
+            self.assertEqual([sys.executable, '-c', 'import pexpect'], calls[0])
+            self.assertEqual(3, len(calls))
+            for command in calls[1:]:
+                export = next(x for x in command if x.startswith('--export='))
+                self.assertIn(f'TM_WORKFLOW_PYTHON={sys.executable}', export)
+                self.assertIn('TM_SCREWER_CHILD=1', export)
+            self.assertTrue((child / 'chain_submission.tsv').is_file())
+
+    def test_missing_pexpect_fails_before_submitting(self):
+        with tempfile.TemporaryDirectory() as t:
+            child = self.prepared_child(Path(t))
+            calls = []
+
+            def fake_execute(command, *, cwd, **kwargs):
+                calls.append(command)
+                return SimpleNamespace(returncode=1, stdout='ModuleNotFoundError: pexpect')
+
+            with mock.patch.object(screwer, 'execute', side_effect=fake_execute), \
+                 mock.patch.object(screwer.shutil, 'which', return_value='/usr/bin/sbatch'), \
+                 mock.patch.dict(screwer.os.environ, {'TM_WORKFLOW_PYTHON': sys.executable}):
+                with self.assertRaisesRegex(RuntimeError, 'cannot import pexpect'):
+                    screwer.submit(child, 'aoforce')
+            self.assertEqual(1, len(calls))
+            self.assertFalse((child / 'chain_submission.tsv').exists())
+
+    def test_legacy_backend_does_not_require_or_pin_pexpect(self):
+        with tempfile.TemporaryDirectory() as t:
+            child = self.prepared_child(Path(t), backend='legacy')
+            commands = []
+
+            def fake_execute(command, *, cwd, **kwargs):
+                commands.append(command)
+                return SimpleNamespace(returncode=0, stdout=str(7800000 + len(commands)))
+
+            with mock.patch.object(screwer, 'execute', side_effect=fake_execute), \
+                 mock.patch.object(screwer.shutil, 'which', return_value='/usr/bin/sbatch'), \
+                 mock.patch.dict(screwer.os.environ, {}, clear=True):
+                self.assertEqual(2, screwer.submit(child, 'aoforce'))
+            self.assertEqual(2, len(commands))
+            for command in commands:
+                self.assertEqual('sbatch', command[0])
+                self.assertNotIn('TM_WORKFLOW_PYTHON=', ' '.join(command))
+
+    def test_batch_script_uses_pinned_python_for_all_helpers(self):
+        script = (Path(screwer.__file__).parent / 'turbo.pipeline.slurm').read_text()
+        self.assertIn('DEFINE_PYTHON_BIN="${TM_WORKFLOW_PYTHON:-python3}"', script)
+        self.assertIn('"$DEFINE_PYTHON_BIN" screwer_workflow.py --define-fallback', script)
+        self.assertIn('python3 tm_workflow.py', script)
+        self.assertNotIn('python3 screwer_workflow.py --define-fallback', script)
 
 
 class AdditionalCyclesTests(unittest.TestCase):

@@ -475,6 +475,21 @@ def submit(child, method):
         raise RuntimeError(f'{child}: copied SLURM script lacks DEFINE fallback; inspect/update it manually')
     if shutil.which('sbatch') is None:
         raise RuntimeError('sbatch not found; submit on VACC')
+    # The TURBOMOLE module supplies its own Python on compute nodes.  Pin
+    # the submitter's Python only for the opt-in adaptive backend so the
+    # SLURM allocation can import pexpect without relying on inherited PATH.
+    workflow_python = None
+    if info.get('define_backend', 'legacy') == 'adaptive':
+        workflow_python = os.environ.get('TM_WORKFLOW_PYTHON') or sys.executable
+        if (not os.path.isabs(workflow_python) or
+                not Path(workflow_python).is_file() or
+                ',' in workflow_python or '\n' in workflow_python):
+            raise RuntimeError('adaptive DEFINE needs an absolute Python executable path '
+                               '(use TM_WORKFLOW_PYTHON to select one)')
+        check = execute([workflow_python, '-c', 'import pexpect'], cwd=child)
+        if check.returncode:
+            raise RuntimeError(f'adaptive DEFINE Python {workflow_python} cannot import pexpect; '
+                               'activate the VACC lan-dev environment or set TM_WORKFLOW_PYTHON')
     stages = (*STAGES, method)
     # Lock the child folder, including when submit is invoked automatically.
     lock = child / '.lan_submission_lock'
@@ -491,10 +506,13 @@ def submit(child, method):
             cpus = os.environ.get('TM_CPUS', '20')
             if not cpus.isdecimal() or int(cpus) < 1:
                 raise RuntimeError('invalid TM_CPUS')
+            export_spec = f'ALL,TM_STAGE={stage},TM_SCREWER_CHILD=1'
+            if workflow_python is not None:
+                export_spec += f',TM_WORKFLOW_PYTHON={workflow_python}'
             opts = ['sbatch', '--parsable', '--partition=general', '--time=2-00:00:00',
                     f'--mem={mem}', f'--cpus-per-task={cpus}',
                     f'--job-name=tm-{info["metal"]}-screwer-{stage}',
-                    f'--export=ALL,TM_STAGE={stage},TM_SCREWER_CHILD=1']
+                    f'--export={export_spec}']
             if dep:
                 opts.append(f'--dependency=afterok:{dep}')
             opts.append('turbo.pipeline.slurm')
