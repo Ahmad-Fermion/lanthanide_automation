@@ -16,15 +16,31 @@ RE_LN = re.compile(r'^(la|ce|pr|nd|pm|sm|eu|gd|tb|dy|ho|er|tm|yb|lu)$', re.I)
 
 
 def make_coord(text, metal):
-    lines = text.splitlines(keepends=True)
+    """Replace the element field of exactly one Ln atom within $coord.
+
+    TURBOMOLE permits extra per-atom fields, especially ``f`` for a fixed
+    atom.  These fields, original whitespace, and other data groups must
+    survive preparation unchanged.
+    """
     changed = 0
+    in_coord = False
     out = []
-    for line in lines:
-        parts = line.split()
-        if len(parts) >= 4 and RE_LN.fullmatch(parts[3]):
-            line = re.sub(r'(?i)(\s+)(la|ce|pr|nd|pm|sm|eu|gd|tb|dy|ho|er|tm|yb|lu)(\s*)$',
-                          lambda m: m.group(1) + metal + m.group(3), line)
-            changed += 1
+    for line in text.splitlines(keepends=True):
+        stripped = line.lstrip()
+        if re.match(r'(?i)^\$coord(?=\s|$)', stripped):
+            in_coord = True
+        elif stripped.startswith('$'):
+            in_coord = False
+        elif in_coord and not stripped.startswith('#'):
+            parts = line.split()
+            if len(parts) >= 4 and RE_LN.fullmatch(parts[3]):
+                # Locate the fourth *token*, not the end of the row: a fixed
+                # metal may appear as ``... gd f`` rather than ``... gd``.
+                hit = re.match(r'^(\s*\S+\s+\S+\s+\S+\s+)(\S+)', line)
+                if hit is None or hit.group(2) != parts[3]:
+                    raise ValueError('cannot locate lanthanide element in coord row')
+                line = line[:hit.start(2)] + metal + line[hit.end(2):]
+                changed += 1
         out.append(line)
     if changed != 1:
         raise ValueError(f'coord must contain exactly one lanthanide atom (found {changed})')
