@@ -417,6 +417,34 @@ existing control/orbitals, with `TM_MANUAL_RECOVERY` constrained to Hessian
 stages only; the tool does not invent charge or spin metadata. Manual SCF or
 JOBEX recovery without provenance is intentionally rejected.
 
+### Automatic dual La/Lu preparation and submission
+
+Ordinary `lan-setup` and `lan-run` automatically prepare both the standard
+unrestricted `la/` or `lu/` and complementary restricted `la_closedshell/` or
+`lu_closedshell/` when the master `def_closedshell.inp` exists. For a normal
+`lan-run` call, **both electronic solutions are submitted automatically**:
+
+```
+lan-run ao --metals la lu        # prepare + submit both SCF formulations, AOFORCE
+lan-run --metals la lu           # prepare + submit both, geometry optimization only
+lan-run --metals la lu --prepare-only   # prepare both, submit neither
+```
+
+`lan-setup` never submits jobs. Existing submitted calculations are never
+resubmitted. A pristine, previously prepared restricted folder can be submitted
+by normal `lan-run` without a second `--closed-shell` command. Existing
+unrestricted folders retain the established `--include-existing` policy.
+Neither command overwrites manual scientific inputs or calculation results.
+A missing or invalid restricted template is reported; unrestricted jobs
+continue, and a restricted job is not guessed from a potentially different
+unrestricted EHT menu. Explicit restricted-only `lan-run --closed-shell`
+remains supported. `--resume-partial` resumes only the selected unrestricted
+chain, not a separate restricted calculation.
+
+When a Hessian method (`ao` or `num`) is supplied, **both** formulations receive
+that Hessian stage. With no method, **neither** is submitted for a Hessian,
+which is appropriate for constrained-geometry optimizations.
+
 ### Opt-in restricted (closed-shell) La/Lu
 
 The whole **complex** must admit an even-electron closed-shell state; a La(III)

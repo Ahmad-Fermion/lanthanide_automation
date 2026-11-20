@@ -10,15 +10,16 @@ Submit TURBOMOLE lanthanide jobs on VACC (14 metals; Pm excluded).
 Run from an EF project directory containing control, coord and def.inp.
 
 Usage: lan-run [num|ao] [options]       (default: no Hessian)
-  lan-run ao --closed-shell --metals la lu     (opt-in separate *_closedshell folders)
-  lan-run --closed-shell --metals lu --prepare-only
+  lan-run ao --metals la lu              (submits unrestricted AND restricted)
+  lan-run --metals la lu --prepare-only  (prepares both; no submissions)
+  lan-run --closed-shell --metals lu     (restricted-only, still supported)
   lan-run = geometry optimization only (no Hessian)
   num = NumForce; ao = aoforce (full names also accepted).
 
 Options:
   --metals sm tb      Only these metals (default: all 14)
-  --prepare-only      Prepare folders; submit nothing
-  --include-existing  Submit pristine, never-run folders from lan-setup
+  --prepare-only      Prepare folders; submit nothing (including restricted)
+  --include-existing  Submit pristine, previously prepared folders too
   --resume-partial    Resume an interrupted chain without repeating submitted jobs
   --screwer           After a completed Hessian, check for negative modes and run
                       one screwer reoptimization using master screwer.inp and
@@ -35,6 +36,7 @@ Examples:
   lan-run                                 # create/submit missing metals, no Hessian
   lan-run ao                              # create/submit missing metals, aoforce
   lan-run num --metals gd tb              # two metals, NumForce
+  lan-run ao --metals la lu              # both SCF formulations for La/Lu
 
 Existing scientific inputs are preserved; opt-in submissions add only job records.
 New gd/ requires master def_gd.inp.
@@ -52,7 +54,7 @@ for option in "$@"; do
     if [[ "$option" == '--closed-shell' ]]; then
         args=()
         for item in "$@"; do [[ "$item" == '--closed-shell' ]] || args+=("$item"); done
-        exec python3 "$SCRIPT_DIR/closed_shell_workflow.py" "${args[@]}"
+        exec python3 "$SCRIPT_DIR/closed_shell_workflow.py" "${args[@]+"${args[@]}"}"
     fi
 done
 
@@ -64,6 +66,7 @@ resume_partial=0
 screwer_auto=0
 metals=(la ce pr nd sm eu gd tb dy ho er tm yb lu)
 selected_metals=()
+selected_count=0
 
 while (($#)); do
     case "$1" in
@@ -76,11 +79,13 @@ while (($#)); do
         --metals)
             shift
             selected_metals=()
+            selected_count=0
             while (($#)) && [[ "$1" != -* && "$1" != numforce && "$1" != aoforce && "$1" != num && "$1" != ao ]]; do
-                selected_metals+=("${1,,}")
+                selected_metals+=("$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')")
+                ((selected_count+=1))
                 shift
             done
-            ((${#selected_metals[@]})) || { echo 'ERROR: --metals requires at least one symbol' >&2; exit 2; }
+            ((selected_count)) || { echo 'ERROR: --metals requires at least one symbol' >&2; exit 2; }
             ;;
         --prepare-only) prepare_only=1; shift ;;
         --include-existing) include_existing=1; shift ;;
@@ -97,7 +102,7 @@ if ((screwer_auto)); then
         [[ -s "$base/$template" ]] || { echo "ERROR: --screwer requires project template $base/$template" >&2; exit 2; }
     done
     # The Gd EHT menu needs the same extra answer as in def_gd.inp.
-    if (( ${#selected_metals[@]} == 0 )); then
+    if (( selected_count == 0 )); then
         [[ -s "$base/def_screwer_gd.inp" ]] || { echo 'ERROR: --screwer for all metals requires def_screwer_gd.inp' >&2; exit 2; }
     else
         for selected in "${selected_metals[@]}"; do
@@ -111,11 +116,11 @@ if ((resume_partial)); then
     (( ! include_existing && ! prepare_only )) || {
         echo 'ERROR: --resume-partial cannot be combined with --include-existing or --prepare-only' >&2; exit 2;
     }
-    ((${#selected_metals[@]})) || {
+    ((selected_count)) || {
         echo 'ERROR: --resume-partial requires explicit --metals (only known partial chains)' >&2; exit 2;
     }
 fi
-if ((${#selected_metals[@]})); then metals=("${selected_metals[@]}"); fi
+if ((selected_count)); then metals=("${selected_metals[@]}"); fi
 for metal in "${metals[@]}"; do
     case "$metal" in
         la|ce|pr|nd|sm|eu|gd|tb|dy|ho|er|tm|yb|lu) ;;
@@ -138,15 +143,17 @@ done
 [[ "$EIGER_CPUS" =~ ^[1-9][0-9]*$ ]] || { echo "ERROR: invalid EIGER_CPUS=$EIGER_CPUS" >&2; exit 2; }
 
 created=()
+created_count=0
 failures=0
 if (( ! resume_partial )); then
     for metal in "${metals[@]}"; do
-        if [[ -e "$base/$metal" ]]; then
-            echo "SKIP SETUP $metal: existing path preserved completely"
-            continue
-        fi
+        # Run the idempotent preparation helper even when the standard metal
+        # folder exists: it may prepare missing complementary La/Lu variants.
+        # Only freshly created STANDARD folders enter the submission list.
+        was_existing=0
+        [[ -e "$base/$metal" ]] && was_existing=1
         if python3 "$SCRIPT_DIR/setup_lanthanides.py" --base "$base" --metals "$metal"; then
-            created+=("$metal")
+            if (( ! was_existing )); then created+=("$metal"); ((created_count+=1)); fi
         else
             echo "ERROR $metal: preparation failed; continuing with other metals" >&2
             ((failures+=1))
@@ -155,7 +162,7 @@ if (( ! resume_partial )); then
 fi
 
 if ((prepare_only)); then
-    echo "Preparation finished. Created ${#created[@]} folder(s); no jobs submitted. Failed: $failures."
+    echo "Preparation finished. Created $created_count folder(s); no jobs submitted. Failed: $failures."
     ((failures == 0))
     exit $?
 fi
@@ -166,10 +173,10 @@ fi
 if ((resume_partial)); then
     submit_metals=("${metals[@]}")
 else
-    submit_metals=("${created[@]}")
+    submit_metals=("${created[@]+"${created[@]}"}")
     if ((include_existing)); then
         for metal in "${metals[@]}"; do
-            for newmetal in "${created[@]}"; do
+            for newmetal in "${created[@]+"${created[@]}"}"; do
                 [[ "$metal" != "$newmetal" ]] || continue 2
             done
             submit_metals+=("$metal")
@@ -249,7 +256,7 @@ submit_metal() (
         # Only already-existing folders need this extra check; newly created
         # ones cannot have pending pre-existing jobs by construction.
         local is_new=0 newmetal
-        for newmetal in "${created[@]}"; do
+        for newmetal in "${created[@]+"${created[@]}"}"; do
             [[ "$metal" != "$newmetal" ]] || { is_new=1; break; }
         done
         if (( ! is_new )); then prepared_opts+=(--check-queue); fi
@@ -315,14 +322,50 @@ submit_metal() (
     fi
 )
 
-for metal in "${submit_metals[@]}"; do
+for metal in "${submit_metals[@]+"${submit_metals[@]}"}"; do
     if ! submit_metal "$metal"; then
         ((failures+=1))
         echo "WARNING: continuing after $metal submission failure" >&2
     fi
 done
 
-printf 'Done. Prepared %d new folder(s); %d failure(s). See each metal/chain_submission.tsv.\n' "${#created[@]}" "$failures"
+# A normal lan-run also launches the complementary restricted La/Lu chain.
+# setup_lanthanides.py has already prepared each complementary folder above.
+# Do not silently replay completed or partly submitted calculations, and do
+# not treat explicit --resume-partial for the unrestricted chain as permission
+# to start another, unrelated electronic solution.
+if (( ! resume_partial )); then
+    for metal in "${metals[@]}"; do
+        [[ "$metal" == la || "$metal" == lu ]] || continue
+        restricted_dir="$base/${metal}_closedshell"
+        if [[ ! -d "$restricted_dir" ]]; then
+            echo "SKIP ${metal}_closedshell: no prepared restricted folder (check def_closedshell.inp)"
+            continue
+        fi
+        if [[ -e "$restricted_dir/chain_plan.txt" || -e "$restricted_dir/chain_submission.tsv" ]]; then
+            if [[ -f "$restricted_dir/chain_plan.txt" && -f "$restricted_dir/chain_submission.tsv" ]]; then
+                echo "SKIP ${metal}_closedshell: chain already submitted; inspect lan-recover if interrupted"
+                continue
+            fi
+            echo "ERROR ${metal}_closedshell: incomplete chain record; review before resubmitting" >&2
+            ((failures+=1))
+            continue
+        fi
+        # A prepared-but-never-submitted restricted folder is eligible even if
+        # it was created by an earlier lan-setup --prepare-only. The dedicated
+        # restricted submitter verifies pristine input provenance, locks, and
+        # scheduler state; no existing scientific results are overwritten.
+        closed_method=()
+        [[ "$frequency" == none ]] || closed_method=("$frequency")
+        if ! python3 "$SCRIPT_DIR/closed_shell_workflow.py" "${closed_method[@]+"${closed_method[@]}"}" \
+                --base "$base" --metals "$metal" --include-existing; then
+            echo "ERROR ${metal}_closedshell: restricted submission failed" >&2
+            ((failures+=1))
+        fi
+    done
+fi
+
+printf 'Done. Prepared %d new folder(s); %d failure(s). See each metal/chain_submission.tsv.\n' "$created_count" "$failures"
 echo 'To monitor: squeue -u "$USER"'
 echo 'On failure, afterok blocks all dependent stages; orbital holes are warnings only.'
 if ((failures > 0)); then exit 1; fi

@@ -131,6 +131,27 @@ def setup_one(base, metal):
         raise
 
 
+
+def prepare_default_restricted(base, metal):
+    """Prepare complementary restricted La/Lu input without submitting it.
+
+    Standard unrestricted projects must keep working without a restricted
+    DEFINE transcript. Existing folders are never overwritten.
+    """
+    if metal not in ('la', 'lu'):
+        return
+    if not (base / 'def_closedshell.inp').is_file():
+        print(f'NOTE {metal}_closedshell: not prepared (no def_closedshell.inp in project root)')
+        return
+    from closed_shell_workflow import prepare
+    try:
+        prepare(base, metal)
+    except (ValueError, OSError, json.JSONDecodeError) as exc:
+        # An optional restricted template must not block standard UHF runs.
+        print(f'WARNING {metal}_closedshell: not prepared ({exc})', file=sys.stderr)
+
+
+
 def main():
     if '--closed-shell' in sys.argv[1:]:
         raw = [x for x in sys.argv[1:] if x != '--closed-shell']
@@ -165,6 +186,7 @@ def main():
     for metal in args.metals:
         try:
             if setup_one(base, metal): created.append(metal)
+            prepare_default_restricted(base, metal)
         except Exception as e:
             print(f'ERROR {metal}: {e}', file=sys.stderr)
             return 1
