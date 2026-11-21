@@ -230,8 +230,17 @@ def stage_plan(folder, kind, method):
         return stages + ([method] if method != 'none' else []), reason
     if scf_ok(folder / 'ridft.integer.out'):
         return ['jobex_eiger'] + ([method] if method != 'none' else []), 'integer SCF converged; restart JOBEX'
-    if not (folder / 'initial_occupations').is_file():
-        raise RecoveryError('initial_occupations missing; cannot safely restore the original open-shell state')
+    if not ((folder / 'initial_occupations').is_file() or
+            (folder / 'recovery_occupations').is_file()):
+        # Legacy turbo.resume.slurm did not save the original DEFINE shells.
+        # Planning remains read-only; the compute job snapshots verified
+        # present-day integer shells before removing $fermi.
+        try:
+            from tm_workflow import verified_legacy_occupation_reference
+            verified_legacy_occupation_reference(folder)
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise RecoveryError('initial_occupations missing and legacy current-shell '
+                                f'reference is not verifiable: {exc}') from exc
     if (scf_ok(folder / 'ridft.out') or scf_ok(folder / 'ridft.retry.out') or
             any(scf_ok(p) for p in folder.glob('ridft.resume.*.out')) or verified_legacy_resume(folder)):
         if integer_scf_prepared(folder):
@@ -239,7 +248,10 @@ def stage_plan(folder, kind, method):
             reason = 'initial SCF converged; $fermi already removed; resume integer SCF without repeating EIGER/occupation fix'
         else:
             stages = ['eiger_fix_integer_ridft', 'jobex_eiger']
-            reason = 'initial SCF converged; perform occupation fix then integer SCF'
+            reason = ('verified legacy SCF; adopt validated current integer shells before occupation fix'
+                      if not ((folder / 'initial_occupations').is_file() or
+                              (folder / 'recovery_occupations').is_file()) else
+                      'initial SCF converged; perform occupation fix then integer SCF')
         return stages + ([method] if method != 'none' else []), reason
     if not (folder / 'define_setup.ok').is_file():
         raise RecoveryError('initial DEFINE not verified; manual inspection required')

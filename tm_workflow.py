@@ -16,6 +16,7 @@ HERE = Path.cwd()
 META = HERE / 'metal.json'
 STATE = HERE / 'workflow_status.json'
 OCC_REFERENCE = HERE / 'initial_occupations'
+RECOVERY_OCC_REFERENCE = HERE / 'recovery_occupations'
 
 
 def now():
@@ -114,11 +115,94 @@ def save_initial_occupations():
     print(f'Saved define occupations in {OCC_REFERENCE.name}', flush=True)
 
 
+
+def verified_legacy_occupation_reference(folder):
+    """Return current integer shells only for a verified legacy SCF recovery.
+
+    This is *not* a reconstruction of the original DEFINE occupations. It
+    captures the explicitly present post-SCF integer shell assignment so that
+    Fermi smearing can be removed without inventing an electronic state.
+    The conservative count check currently supports C1 geometry only.
+    Never writes files; safe for use by lan-recover --plan.
+    """
+    folder = Path(folder)
+    marker = folder / 'ridft.resume.ok'
+    if not marker.is_file() or marker.is_symlink():
+        raise RuntimeError('verified legacy RIDFT recovery marker missing')
+    match = re.search(r'(?m)^log=(ridft\.resume\.[A-Za-z0-9_.-]+\.out)\s*$', marker.read_text())
+    if not match:
+        raise RuntimeError('legacy RIDFT recovery marker has no usable log')
+    output = folder / match.group(1)
+    if not output.is_file() or output.is_symlink():
+        raise RuntimeError('verified legacy RIDFT recovery log missing')
+    report = output.read_text(errors='replace')
+    checks = (r'ENERGY\s+CONVERGED\s*!',
+              r'convergence\s+criteria\s+satisfied\s+after\s+\d+\s+iterations',
+              r'ridft\s*:\s*all\s+done')
+    if not all(re.search(expr, report, re.I) for expr in checks):
+        raise RuntimeError('legacy RIDFT log does not demonstrate SCF convergence')
+
+    meta = json.loads((folder / 'metal.json').read_text())
+    unpaired = meta.get('unpaired')
+    if type(unpaired) is not int or unpaired < 0:
+        raise RuntimeError('invalid metal.json unpaired-electron count')
+    ctrl = (folder / 'control').read_text()
+    if not re.search(r'(?mi)^[ \t]*\$symmetry\s+c1\s*$', ctrl):
+        raise RuntimeError('cannot count recovered shell electrons reliably outside C1')
+    fermi = [ctrl[a:b] for name, a, b in group_spans(ctrl) if name == 'fermi']
+    if len(fermi) != 1:
+        raise RuntimeError('expected exactly one $fermi before legacy occupation recovery')
+    nue = re.search(r'\bnue\s*=\s*([+\-]?\d+(?:\.\d+)?)', fermi[0], re.I)
+    if not nue or abs(float(nue.group(1)) - unpaired) > 1e-6:
+        raise RuntimeError('legacy $fermi nue does not match metal.json unpaired count')
+    groups = shell_blocks(ctrl, 'legacy post-SCF control')
+    counts = {}
+    for name in ('alpha', 'beta'):
+        rows = [line.strip() for line in groups[name][2].splitlines()[1:]
+                if line.strip() and not line.lstrip().startswith('#')]
+        if not rows:
+            raise RuntimeError(f'legacy ${name} shells is empty')
+        total = 0
+        seen = set()
+        for line in rows:
+            entry = re.fullmatch(r'([A-Za-z0-9_+\-]+)\s+(\d+)(?:\s*-\s*(\d+))?\s+\(\s*1(?:\.0*)?\s*\)', line)
+            if not entry:
+                raise RuntimeError(f'cannot verify integer legacy ${name} shells: {line}')
+            irrep, first, last = entry.group(1).lower(), int(entry.group(2)), int(entry.group(3) or entry.group(2))
+            if first < 1 or last < first:
+                raise RuntimeError(f'invalid legacy ${name} shell range: {line}')
+            for idx in range(first, last + 1):
+                if (irrep, idx) in seen:
+                    raise RuntimeError(f'duplicate legacy ${name} shell index: {idx}')
+                seen.add((irrep, idx))
+            total += last - first + 1
+        counts[name] = total
+    if counts['alpha'] - counts['beta'] != unpaired:
+        raise RuntimeError('legacy shell counts do not match metal.json unpaired electrons')
+    for name in ('alpha', 'beta'):
+        orbital = folder / name
+        if not orbital.is_file() or orbital.is_symlink() or orbital.stat().st_size == 0:
+            raise RuntimeError(f'legacy {name} orbital file missing or empty')
+    return groups['alpha'][2] + groups['beta'][2]
+
+
+def ensure_recovery_occupation_reference():
+    """Capture a post-SCF recovery reference only when DEFINE's snapshot is absent."""
+    if OCC_REFERENCE.is_file() or RECOVERY_OCC_REFERENCE.is_file():
+        return
+    reference = verified_legacy_occupation_reference(HERE)
+    tmp = RECOVERY_OCC_REFERENCE.with_name(RECOVERY_OCC_REFERENCE.name + '.tmp.' + str(os.getpid()))
+    tmp.write_text(reference)
+    tmp.replace(RECOVERY_OCC_REFERENCE)
+    print('WARNING: original DEFINE occupations unavailable; adopting verified current '
+          'integer shell assignments as recovery_occupations (NOT initial_occupations)', flush=True)
+
 def restore_shells(text):
     """Replace only $alpha/$beta shell groups; preserve all other control groups."""
-    if not OCC_REFERENCE.is_file():
-        raise RuntimeError(f'{OCC_REFERENCE.name} missing; it must be saved immediately after define')
-    expected = shell_blocks(OCC_REFERENCE.read_text(), OCC_REFERENCE.name)
+    source = OCC_REFERENCE if OCC_REFERENCE.is_file() else RECOVERY_OCC_REFERENCE
+    if not source.is_file():
+        raise RuntimeError('neither initial_occupations nor verified recovery_occupations is available')
+    expected = shell_blocks(source.read_text(), source.name)
     current = shell_blocks(text, 'current control')
     changed = any(current[name][2] != expected[name][2] for name in ('alpha', 'beta'))
     # Reverse-order editing preserves the offsets, even if beta precedes alpha.
@@ -357,7 +441,9 @@ def check_restricted_define():
 def remove_fermi():
     p = HERE / 'control'
     original = p.read_text()
-    # Restore the occupations saved directly after define before integer SCF.
+    ensure_recovery_occupation_reference()
+    # Restore the occupations saved directly after define, or a verified
+    # legacy post-SCF reference when the original DEFINE snapshot is absent.
     # Other groups ($energy, $grad, $ricore, etc.) are left untouched.
     restored, changed = restore_shells(original)
     fermi = [(start, end) for name, start, end in group_spans(restored) if name == 'fermi']
