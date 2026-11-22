@@ -468,7 +468,15 @@ and dispersion settings remain in place, but open-shell and Fermi groups are
 removed from the **new copy**. A positive even all-electron molecular count
 is required; this is only a necessary precondition, not a multiplicity proof.
 The new pipeline has `restricted_ridft` → `jobex_eiger` → optional Hessian,
-without the open-shell occupation-removal stage. DEFINE must terminate
+without the open-shell occupation-removal stage.
+
+A restricted folder prepared with `--prepare-only` can have its **local**
+`def.inp` corrected before submission. Submission warns when its contents
+have changed and uses the edited file unchanged. It still checks the target
+metal basis selector, absence of `u N` unrestricted commands, and agreement
+of the EHT charge with `metal.json`. Changes to prepared `coord` or `control`
+remain subject to the existing separate checks. Already-submitted restricted
+chains cannot be submitted twice. DEFINE must terminate
 normally and produce `$closed shells`, `$scfmo`, and `mos`; otherwise RIDFT
 will not start. These paths require a real VACC DEFINE test.
 

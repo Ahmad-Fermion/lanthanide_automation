@@ -134,23 +134,63 @@ def prepare(base, metal):
 
 
 def pristine(folder, base, metal):
+    """Validate an unsubmitted restricted folder without forbidding DEFINE edits.
+
+    The prepared manifest is provenance, not a lock on the user's scientific
+    DEFINE transcript. We still reject missing files, wrong metal/charge,
+    unrestricted initialization, and folders that have already been run.
+    """
     allowed = {'coord', 'control', 'def.inp', 'metal.json', 'restricted_prepared.json',
                'tm_workflow.py', 'turbo.pipeline.slurm', 'turbo.resume.slurm',
                'setup_lanthanides.py', 'screwer_workflow.py'}
     if folder.is_symlink() or not folder.is_dir() or set(p.name for p in folder.iterdir()) != allowed:
         raise ValueError(f'{folder} is not a pristine prepared restricted folder')
     info = json.loads((folder / 'restricted_prepared.json').read_text())
-    sources, _, _ = inputs(base, metal)
     if info.get('variant') != 'restricted' or info.get('metal') != metal:
         raise ValueError('invalid restricted provenance')
+
+    # Keep the existing guards for prepared geometry and control. These are not
+    # the manually editable DEFINE transcript, and drift may invalidate the
+    # restricted initial electronic state.
+    sources = {'coord': make_coord((base / 'coord').read_text(), metal),
+               'control': restricted_control((base / 'control').read_text())}
     for filename, content in sources.items():
         p = folder / filename
         if p.is_symlink() or not p.is_file() or p.read_text() != content:
             raise ValueError(f'{folder}/{filename} was changed after preparation')
         if info['files_sha256'].get(filename) != sha(content):
             raise ValueError(f'{filename} manifest hash mismatch')
-    if info.get('metal_sha256') != sha((folder / 'metal.json').read_text()):
+
+    meta_path = folder / 'metal.json'
+    if meta_path.is_symlink() or not meta_path.is_file():
+        raise ValueError('missing or linked metal.json')
+    if info.get('metal_sha256') != sha(meta_path.read_text()):
         raise ValueError('metal.json altered after preparation')
+    meta = json.loads(meta_path.read_text())
+    if meta.get('metal') != metal or meta.get('restricted') is not True or meta.get('unpaired') != 0:
+        raise ValueError('invalid restricted metal metadata')
+
+    define_path = folder / 'def.inp'
+    if define_path.is_symlink() or not define_path.is_file():
+        raise ValueError('restricted def.inp missing or linked')
+    define_text = define_path.read_text()
+    if info.get('files_sha256', {}).get('def.inp') != sha(define_text):
+        print(f'WARNING {folder}: def.inp was edited after preparation; preserving user-defined DEFINE input',
+              flush=True)
+
+    # Validate only the essentials instead of demanding byte-for-byte equality
+    # with the master transcript. Dialogue, basis details and other manual
+    # changes remain under the user's control.
+    if re.search(r'(?im)^\s*u\s+\d+\s*$', define_text):
+        raise ValueError('edited restricted def.inp contains a u N unrestricted occupation command')
+    selectors = re.findall(
+        r'(?im)^\s*b\s+["\'](la|ce|pr|nd|sm|eu|gd|tb|dy|ho|er|tm|yb|lu)["\']\s+\S+\s*$',
+        define_text)
+    if [symbol.lower() for symbol in selectors] != [metal]:
+        raise ValueError(f'edited restricted def.inp must specify exactly one basis for {metal}')
+    charge = read_charge(define_text)
+    if charge is None or charge != meta.get('charge'):
+        raise ValueError('edited restricted def.inp EHT charge disagrees with metal.json; reconcile charge before submission')
 
 
 def submit(base, metal, method):
