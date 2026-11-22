@@ -143,21 +143,21 @@ def selected_method(folder, kind, requested):
 
 
 def integer_scf_prepared(folder):
-    """Recognize the already-completed occupation fix after ridft_eiger_fix.
+    """Classify Fermi/occupation-fix provenance without modifying control.
 
-    An initial run of ridft_eiger_fix removes $fermi before finishing. Recovery
-    must not run that non-idempotent step again. Require the saved pre-removal
-    control as evidence rather than inferring readiness from a missing group.
-    This is read-only: never overwrite manually edited SCF settings.
+    False: an active $fermi still requires the usual occupation-fix stage.
+    True: a saved pre-removal control supports resuming the integer SCF stage.
+    None: $fermi is absent without that evidence (e.g. manually disabled).
+    In the last case recovery must not invoke remove-fermi or assume that
+    the automated occupation fix took place.
     """
     control = text(folder / 'control')
     if re.search(r'(?m)^[ \t]*\$fermi\b', control, re.I):
         return False
     previous = folder / 'control.with_fermi'
-    if not previous.is_file() or not re.search(r'(?m)^[ \t]*\$fermi\b', text(previous), re.I):
-        raise RecoveryError('control has no $fermi, but control.with_fermi does not verify '
-                            'the occupation fix; inspect the control before resuming integer SCF')
-    return True
+    if previous.is_file() and re.search(r'(?m)^[ \t]*\$fermi\b', text(previous), re.I):
+        return True
+    return None
 
 
 def verified_legacy_resume(folder):
@@ -230,8 +230,10 @@ def stage_plan(folder, kind, method):
         return stages + ([method] if method != 'none' else []), reason
     if scf_ok(folder / 'ridft.integer.out'):
         return ['jobex_eiger'] + ([method] if method != 'none' else []), 'integer SCF converged; restart JOBEX'
-    if not ((folder / 'initial_occupations').is_file() or
-            (folder / 'recovery_occupations').is_file()):
+    occupation_state = integer_scf_prepared(folder)
+    if occupation_state is not None and not ((folder / 'initial_occupations').is_file() or
+                                             (folder / 'recovery_occupations').is_file()):
+        # Only stages that reset/restore occupations need a saved reference.
         # Legacy turbo.resume.slurm did not save the original DEFINE shells.
         # Planning remains read-only; the compute job snapshots verified
         # present-day integer shells before removing $fermi.
@@ -243,9 +245,15 @@ def stage_plan(folder, kind, method):
                                 f'reference is not verifiable: {exc}') from exc
     if (scf_ok(folder / 'ridft.out') or scf_ok(folder / 'ridft.retry.out') or
             any(scf_ok(p) for p in folder.glob('ridft.resume.*.out')) or verified_legacy_resume(folder)):
-        if integer_scf_prepared(folder):
+        if occupation_state is True:
             stages = ['integer_ridft', 'jobex_eiger']
             reason = 'initial SCF converged; $fermi already removed; resume integer SCF without repeating EIGER/occupation fix'
+        elif occupation_state is None:
+            # The user may have converged RIDFT after manually commenting out
+            # $fermi. Do not rerun SCF or restore an older occupation snapshot.
+            stages = ['jobex_eiger']
+            reason = ('SCF converged with no verified automated Fermi removal; '
+                      'continue from the user-configured orbitals/occupations')
         else:
             stages = ['eiger_fix_integer_ridft', 'jobex_eiger']
             reason = ('verified legacy SCF; adopt validated current integer shells before occupation fix'
@@ -255,6 +263,10 @@ def stage_plan(folder, kind, method):
         return stages + ([method] if method != 'none' else []), reason
     if not (folder / 'define_setup.ok').is_file():
         raise RecoveryError('initial DEFINE not verified; manual inspection required')
+    if occupation_state is None:
+        # A manual no-Fermi SCF restart must not enter remove-fermi later.
+        return ['ridft-recovery', 'jobex_eiger'] + ([method] if method != 'none' else []), \
+            'restart user-configured SCF without DEFINE or the Fermi occupation-fix stage'
     return ['ridft-recovery', 'eiger_fix_integer_ridft', 'jobex_eiger'] + ([method] if method != 'none' else []), 'restart initial SCF without rerunning DEFINE'
 
 
@@ -360,6 +372,13 @@ def recovery_warnings(folder, kind):
             warnings.append('Screwer contains $fermi: retained as user-configured; verify intended smearing/occupations before submitting')
         elif scf_ok(folder / 'ridft.integer.out'):
             warnings.append('Integer SCF completed but $fermi remains: verify intended occupation treatment before submitting')
+    elif (kind == 'standard' and not (folder / 'restricted_prepared.json').is_file()
+          and not geometry_ok(folder) and not scf_ok(folder / 'ridft.integer.out')
+          and integer_scf_prepared(folder) is None):
+        warnings.append('No active $fermi or verified control.with_fermi; bypassing the '
+                        'automatic occupation reset. Verify that the converged SCF used '
+                        'the current control and that its alpha/beta occupations are '
+                        'appropriate before continuing to JOBEX.')
     return warnings
 
 

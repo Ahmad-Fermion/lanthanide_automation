@@ -418,10 +418,21 @@ When a JOBEX recovery starts on a compute node, it first archives existing
 `jobex.out`/failure markers in `recovery_attempts/<jobid>/`, then removes
 `not.converged` and stale geometry markers before rerunning JOBEX. Frequency
 recovery similarly archives stale frequency outputs before rerunning. No
-science files are overwritten merely by asking for a plan. If old dependent
-jobs remain PENDING after a failed parent job, inspect/cancel those obsolete
-jobs separately before using `--submit`—the tool will never cancel jobs on
-your behalf. All submitted stages are journaled, with afterok dependencies.
+science files are overwritten merely by asking for a plan. When a standard
+calculation has no active `$fermi` and no verifiable `control.with_fermi`
+snapshot, `lan-recover` treats the setting as a possible manual SCF choice:
+it **warns rather than blocks**. After a verified converged SCF it can
+continue directly to JOBEX, without running the automatic occupation reset
+or an additional integer RIDFT; if SCF is not converged but DEFINE was
+verified, it runs manual RIDFT recovery and then JOBEX. **Before submitting,
+confirm that the converged SCF used the current control and that its
+alpha/beta occupations are appropriate.** Commenting out `$fermi` *after* a
+Fermi-smeared SCF does not prove that its final orbital occupations were
+appropriate for JOBEX. The existing verified Fermi-removal workflow is
+unchanged. If old dependent jobs remain PENDING after a failed parent job,
+inspect/cancel those obsolete jobs separately before using `--submit`—the
+tool will never cancel jobs on your behalf. All submitted stages are
+journaled, with afterok dependencies.
 
 For manual calculations without `metal.json`, **Hessian-only recovery from a
 verified converged geometry** is supported with an explicitly selected method

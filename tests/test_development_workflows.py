@@ -164,13 +164,62 @@ class UniversalRecoveryTests(unittest.TestCase):
             stages, _ = recovery.stage_plan(folder, 'standard', 'numforce')
             self.assertEqual(['eiger_fix_integer_ridft', 'jobex_eiger', 'numforce'], stages)
 
-    def test_missing_fermi_without_saved_prior_control_requires_review(self):
+    def test_manually_disabled_fermi_continues_from_converged_scf_with_warning(self):
         with tempfile.TemporaryDirectory() as t:
             folder = populate(Path(t), method='numforce')
+            # Regression: no automated control.with_fermi because the user
+            # commented out $fermi before the manual turbo.resume.slurm RIDFT.
+            (folder / 'control').write_text(
+                '$dft\n functional tpssh\n#$fermi tmstrt=1000 nue=3.00\n'
+                '$alpha shells\n a 1-5 (1)\n$beta shells\n a 1-2 (1)\n$end\n')
             (folder / 'initial_occupations').write_text('saved occupied shells')
-            (folder / 'ridft.out').write_text(SCF_OK)
-            with self.assertRaisesRegex(recovery.RecoveryError, 'control.with_fermi'):
-                recovery.stage_plan(folder, 'standard', 'numforce')
+            (folder / 'ridft.resume.ok').write_text('job_id=6658387\nlog=ridft.resume.6658387.out\n')
+            (folder / 'ridft.resume.6658387.out').write_text(SCF_OK)
+            before = (folder / 'control').read_bytes()
+            stages, reason = recovery.stage_plan(folder, 'standard', 'numforce')
+            self.assertEqual(['jobex_eiger', 'numforce'], stages)
+            self.assertIn('user-configured orbitals/occupations', reason)
+            self.assertEqual(before, (folder / 'control').read_bytes())
+            warnings = recovery.recovery_warnings(folder, 'standard')
+            self.assertEqual(1, len(warnings))
+            self.assertIn('No active $fermi', warnings[0])
+            self.assertIn('Verify', warnings[0])
+            with mock.patch.object(recovery.Path, 'cwd', return_value=folder), \
+                 mock.patch.object(recovery, 'submit', return_value=folder / 'mock-journal') as submit, \
+                 contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(0, recovery.main(['--submit']))
+            self.assertIn('WARNING: No active $fermi', output.getvalue())
+            submit.assert_called_once()
+            self.assertEqual(['jobex_eiger', 'numforce'], submit.call_args.args[4])
+            self.assertEqual(before, (folder / 'control').read_bytes())
+
+    def test_no_fermi_manual_recovery_needs_no_occupation_snapshot(self):
+        with tempfile.TemporaryDirectory() as t:
+            folder = populate(Path(t), method='none')
+            (folder / 'control').write_text('$alpha shells\n a 1-5 (1)\n'
+                                           '$beta shells\n a 1-2 (1)\n$end\n')
+            (folder / 'ridft.resume.ok').write_text('job_id=123\nlog=ridft.resume.123.out\n')
+            (folder / 'ridft.resume.123.out').write_text(SCF_OK)
+            stages, _ = recovery.stage_plan(folder, 'standard', 'none')
+            self.assertEqual(['jobex_eiger'], stages)
+            self.assertFalse((folder / 'recovery_occupations').exists())
+
+    def test_no_fermi_unconverged_scf_recovery_skips_occupation_reset(self):
+        with tempfile.TemporaryDirectory() as t:
+            folder = populate(Path(t), method='aoforce')
+            (folder / 'define_setup.ok').touch()
+            stages, reason = recovery.stage_plan(folder, 'standard', 'aoforce')
+            self.assertEqual(['ridft-recovery', 'jobex_eiger', 'aoforce'], stages)
+            self.assertIn('without DEFINE or the Fermi occupation-fix stage', reason)
+
+    def test_fermi_with_missing_occupation_snapshot_remains_blocked(self):
+        with tempfile.TemporaryDirectory() as t:
+            folder = populate(Path(t), method='aoforce')
+            (folder / 'control').write_text('$fermi nue=3.00\n$end\n')
+            (folder / 'ridft.resume.ok').write_text('job_id=123\nlog=ridft.resume.123.out\n')
+            (folder / 'ridft.resume.123.out').write_text(SCF_OK)
+            with self.assertRaisesRegex(recovery.RecoveryError, 'reference is not verifiable'):
+                recovery.stage_plan(folder, 'standard', 'aoforce')
 
     def test_standard_jobex_failure_skips_completed_scf(self):
         with tempfile.TemporaryDirectory() as t:
