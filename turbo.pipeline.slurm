@@ -25,6 +25,20 @@ fi
 set -u
 ulimit -s unlimited
 
+# The module's default Python remains in use for ordinary workflow stages.
+# Adaptive Screwer DEFINE alone can use a pinned interpreter with pexpect.
+DEFINE_PYTHON_BIN="${TM_WORKFLOW_PYTHON:-python3}"
+if [[ -n "${TM_WORKFLOW_PYTHON:-}" ]]; then
+    if [[ "$DEFINE_PYTHON_BIN" != /* || ! -x "$DEFINE_PYTHON_BIN" ]]; then
+        echo "ERROR: TM_WORKFLOW_PYTHON must be an absolute executable path: $DEFINE_PYTHON_BIN" >&2
+        exit 2
+    fi
+    if ! "$DEFINE_PYTHON_BIN" -c 'import pexpect'; then
+        echo "ERROR: selected DEFINE Python cannot import pexpect: $DEFINE_PYTHON_BIN" >&2
+        exit 2
+    fi
+fi
+
 # VERIFIED VACC NumForce/OpenMP settings -- do not change this configuration.
 unset PARA_ARCH TM_PAR_OMP TM_PAR_FORK SMP SMPCPUS HOSTS_FILE
 export PATH="$TURBODIR/bin/em64t-unknown-linux-gnu:$TURBODIR/scripts:$PATH"
@@ -37,8 +51,9 @@ export TURBOTMPDIR="$HOME/scratch/turbomole_tmp/$SLURM_JOB_ID"
 mkdir -p "$TURBOTMPDIR"
 cd "$SLURM_SUBMIT_DIR"
 
-[[ -f control && -f coord && -f tm_workflow.py && -f metal.json ]] || {
-    echo "ERROR: control, coord, tm_workflow.py or metal.json missing in $PWD" >&2
+[[ -f control && -f coord && -f tm_workflow.py ]] &&
+    { [[ -f metal.json ]] || [[ "${TM_MANUAL_RECOVERY:-0}" == 1 ]]; } || {
+    echo "ERROR: control/coord/tm_workflow.py missing, or metal.json unavailable outside manual Hessian recovery: $PWD" >&2
     exit 1
 }
 [[ ! -e control.template ]] || {
@@ -46,11 +61,22 @@ cd "$SLURM_SUBMIT_DIR"
     exit 1
 }
 
+# Recovery of old Screwer children may have copied an older workflow script.
+# The recovery launcher supplies the versioned development controller explicitly.
+SCREWER_CONTROLLER="${TM_RECOVERY_SCREWER_TOOL:-screwer_workflow.py}"
+if [[ -n "${TM_RECOVERY_SCREWER_TOOL:-}" && ! -f "$SCREWER_CONTROLLER" ]]; then
+    echo "ERROR: pinned Screwer recovery controller is missing: $SCREWER_CONTROLLER" >&2
+    exit 2
+fi
 stage="${TM_STAGE:-}"
 case "$stage" in
-    ridft|ridft_eiger_fix|eiger_pre|occupation_fix|integer_ridft|eiger_fix_integer_ridft|jobex|jobex_eiger|screwer_jobex_eiger|eiger_post|numforce|aoforce) ;;
+    ridft|ridft_eiger_fix|eiger_pre|occupation_fix|integer_ridft|eiger_fix_integer_ridft|jobex|jobex_eiger|screwer_jobex_eiger|screwer_ridft_jobex_eiger|restricted_ridft|restricted_ridft_no_define|eiger_post|numforce|aoforce) ;;
     *) echo "ERROR: unknown TM_STAGE='$stage'; use the chain submission script." >&2; exit 2 ;;
 esac
+if [[ "${TM_MANUAL_RECOVERY:-0}" == 1 && "$stage" != numforce && "$stage" != aoforce ]]; then
+    echo 'ERROR: metadata-free manual recovery is limited to Hessian-only stages' >&2
+    exit 2
+fi
 
 active_stage="$stage"
 on_exit() {
@@ -106,8 +132,13 @@ case "$stage" in
             define_input='def_screwer.inp'
         fi
         [[ -f "$define_input" ]] || { echo "ERROR: $define_input missing" >&2; exit 1; }
-        python3 tm_workflow.py record DEFINE RUNNING "define < $define_input"
-        define < "$define_input"
+        python3 tm_workflow.py record DEFINE RUNNING "initial DEFINE with no-ired fallback if needed"
+        if [[ "${TM_SCREWER_CHILD:-0}" == 1 ]]; then
+            # Legacy branch retained for older initial Screwer callers.
+            define < "$define_input" > define.out 2>&1
+        else
+            python3 tm_workflow.py run-initial-define
+        fi
         python3 tm_workflow.py check-define
 
         actual -r
@@ -122,6 +153,28 @@ case "$stage" in
         if [[ "$stage" == ridft_eiger_fix ]]; then
             run_eiger_pre
             run_occupation_fix
+        fi
+        ;;
+
+    restricted_ridft|restricted_ridft_no_define)
+        # A distinct, opt-in RKS calculation: no Fermi or open-shell reset.
+        [[ -s restricted_prepared.json ]] || { echo 'ERROR: restricted manifest missing' >&2; exit 2; }
+        if [[ "$stage" == restricted_ridft ]]; then
+            [[ -s def.inp ]] || { echo 'ERROR: restricted DEFINE input missing' >&2; exit 2; }
+            active_stage=define
+            python3 tm_workflow.py record DEFINE RUNNING 'restricted DEFINE'
+            define < def.inp > define.out 2>&1
+        fi
+        python3 tm_workflow.py check-restricted-define
+        active_stage=ridft
+        actual -r
+        python3 tm_workflow.py record RIDFT RUNNING 'restricted ground-state DFT'
+        log=ridft.out
+        [[ "$stage" == restricted_ridft ]] || log="ridft.resume.${SLURM_JOB_ID}.out"
+        ridft > "$log" 2>&1
+        python3 tm_workflow.py check-ridft "$log"
+        if [[ "${TM_FINAL_NO_HESSIAN:-0}" == 1 ]]; then
+            python3 tm_workflow.py record RIDFT OK 'restricted SCF finished; following JOBEX job will complete'
         fi
         ;;
 
@@ -146,7 +199,7 @@ case "$stage" in
         python3 tm_workflow.py restore-occupations
         ;;
 
-    screwer_jobex_eiger)
+    screwer_jobex_eiger|screwer_ridft_jobex_eiger)
         # Screwer continues with the converged parent orbitals: no Fermi
         # smearing, pre-JOBEX EIGER or occupation reset. Run one fresh SCF
         # for the displaced geometry before optimizing it.
@@ -154,22 +207,40 @@ case "$stage" in
             echo 'ERROR: screwer continuation requires its manifest and def_screwer.inp' >&2
             exit 2
         }
+        if [[ "$stage" == screwer_jobex_eiger ]]; then
         active_stage=define_screwer
         python3 tm_workflow.py record DEFINE RUNNING 'Screwer DEFINE with no-ired fallback on failure'
-        python3 screwer_workflow.py --define-fallback
+        "$DEFINE_PYTHON_BIN" screwer_workflow.py --define-fallback
         python3 tm_workflow.py record DEFINE OK 'Screwer DEFINE validated; continuing without orbital/control comparison'
+        else
+            # Recovery must not execute Screwer displacement or DEFINE again.
+            [[ -s control && -s coord ]] || { echo 'ERROR: missing inherited state' >&2; exit 2; }
+        fi
         active_stage=ridft
         actual -r
         python3 tm_workflow.py record RIDFT RUNNING 'screwer continuation SCF before JOBEX'
-        ridft > ridft.out 2>&1
-        python3 tm_workflow.py check-ridft ridft.out
+        if [[ "$stage" == screwer_ridft_jobex_eiger ]]; then
+            ridft > "ridft.resume.${SLURM_JOB_ID}.out" 2>&1
+            python3 tm_workflow.py check-ridft "ridft.resume.${SLURM_JOB_ID}.out"
+        else
+            ridft > ridft.out 2>&1
+            python3 tm_workflow.py check-ridft ridft.out
+        fi
         # Fall through to the same JOBEX + EIGER implementation; RIDFT
         # shares the first SLURM allocation rather than requesting another.
         ;&
 
     jobex|jobex_eiger)
         active_stage=jobex
-        # Clear stale success markers only; preserve the actual molecular data.
+        # In recovery archive previous failure evidence before resetting markers.
+        # In particular, not.converged MUST be deleted before restarted JOBEX.
+        if [[ "${TM_RECOVERY:-0}" == 1 ]]; then
+            archive="recovery_attempts/${SLURM_JOB_ID}"
+            mkdir -p "$archive"
+            for f in jobex.out GEO_OPT_FAILED not.converged GEO_OPT_CONVERGED converged; do
+                [[ ! -f "$f" ]] || cp -p -- "$f" "$archive/$f"
+            done
+        fi
         rm -f GEO_OPT_CONVERGED GEO_OPT_FAILED converged not.converged
         python3 tm_workflow.py record JOBEX RUNNING 'jobex -ri -gcart 4 -c 600'
         jobex -ri -gcart 4 -c 600 > jobex.out 2>&1
@@ -182,7 +253,7 @@ case "$stage" in
         # package's GEO_OPT_CONVERGED marker. Normalize ONLY after success.
         [[ -f GEO_OPT_CONVERGED ]] || touch GEO_OPT_CONVERGED
         python3 tm_workflow.py record JOBEX OK 'geometry converged'
-        if [[ "$stage" == jobex_eiger || "$stage" == screwer_jobex_eiger ]]; then
+        if [[ "$stage" == jobex_eiger || "$stage" == screwer_jobex_eiger || "$stage" == screwer_ridft_jobex_eiger ]]; then
             run_eiger_post
         fi
         ;;
@@ -192,12 +263,19 @@ case "$stage" in
         ;;
 
     numforce)
-        [[ -f GEO_OPT_CONVERGED && -s gradient ]] || {
+        [[ ( -f GEO_OPT_CONVERGED || -f converged ) && -s gradient ]] || {
             echo 'ERROR: successful optimization marker or gradient missing.' >&2
             exit 2
         }
-        if [[ "${TM_SCREWER_CHILD:-0}" == 1 ]]; then
-            python3 screwer_workflow.py --clean-frequency --base "$(dirname "$(dirname "$PWD")")" --metals "$(basename "$(dirname "$PWD")")"
+        [[ -f GEO_OPT_CONVERGED ]] || touch GEO_OPT_CONVERGED
+        if [[ "${TM_RECOVERY:-0}" == 1 ]]; then
+            archive="recovery_attempts/${SLURM_JOB_ID}"
+            mkdir -p "$archive"
+            for f in hessian vibspectrum vib_normal_modes nprhessian nprvibspectrum npr_vib_normal_modes; do
+                if [[ -f "$f" ]]; then mv -- "$f" "$archive/$f"; fi
+            done
+        elif [[ "${TM_SCREWER_CHILD:-0}" == 1 ]]; then
+            python3 "$SCREWER_CONTROLLER" --clean-frequency --folder "$PWD"
         fi
         python3 tm_workflow.py record NUMFORCE RUNNING 'PARNODES=1 NumForce -ri -central'
         # VERIFIED: exactly one displacement worker, OpenMP threads from allocation.
@@ -205,24 +283,41 @@ case "$stage" in
         python3 tm_workflow.py check-numforce
         python3 tm_workflow.py record DONE SUCCESS 'NumForce completed; see occupation warnings'
         if [[ "${TM_SCREWER_CHILD:-0}" == 1 ]]; then
-            python3 screwer_workflow.py --export-only --base "$(dirname "$(dirname "$PWD")")" --metals "$(basename "$(dirname "$PWD")")"
+            python3 "$SCREWER_CONTROLLER" --export-only --folder "$PWD"
+            # Explicitly capped extra correction cycles; do not invalidate a successful Hessian
+            # if scheduling the next (independent) cycle fails. Log a clear diagnostic.
+            if ! python3 "$SCREWER_CONTROLLER" --advance-cycle --folder "$PWD" > cycle-advance.log 2>&1; then
+                echo "WARNING: optional next Screwer cycle failed; inspect $PWD/cycle-advance.log" >&2
+            fi
         fi
         ;;
 
     aoforce)
-        [[ -f GEO_OPT_CONVERGED ]] || {
+        [[ -f GEO_OPT_CONVERGED || -f converged ]] || {
             echo 'ERROR: successful optimization marker missing.' >&2
             exit 2
         }
-        if [[ "${TM_SCREWER_CHILD:-0}" == 1 ]]; then
-            python3 screwer_workflow.py --clean-frequency --base "$(dirname "$(dirname "$PWD")")" --metals "$(basename "$(dirname "$PWD")")"
+        [[ -f GEO_OPT_CONVERGED ]] || touch GEO_OPT_CONVERGED
+        if [[ "${TM_RECOVERY:-0}" == 1 ]]; then
+            archive="recovery_attempts/${SLURM_JOB_ID}"
+            mkdir -p "$archive"
+            for f in hessian vibspectrum vib_normal_modes nprhessian nprvibspectrum npr_vib_normal_modes; do
+                if [[ -f "$f" ]]; then mv -- "$f" "$archive/$f"; fi
+            done
+        elif [[ "${TM_SCREWER_CHILD:-0}" == 1 ]]; then
+            python3 "$SCREWER_CONTROLLER" --clean-frequency --folder "$PWD"
         fi
         python3 tm_workflow.py record AOFORCE RUNNING 'aoforce'
         aoforce > aoforce.out 2>&1
         python3 tm_workflow.py check-aoforce
         python3 tm_workflow.py record DONE SUCCESS 'aoforce completed; see occupation warnings'
         if [[ "${TM_SCREWER_CHILD:-0}" == 1 ]]; then
-            python3 screwer_workflow.py --export-only --base "$(dirname "$(dirname "$PWD")")" --metals "$(basename "$(dirname "$PWD")")"
+            python3 "$SCREWER_CONTROLLER" --export-only --folder "$PWD"
+            # Explicitly capped extra correction cycles; do not invalidate a successful Hessian
+            # if scheduling the next (independent) cycle fails. Log a clear diagnostic.
+            if ! python3 "$SCREWER_CONTROLLER" --advance-cycle --folder "$PWD" > cycle-advance.log 2>&1; then
+                echo "WARNING: optional next Screwer cycle failed; inspect $PWD/cycle-advance.log" >&2
+            fi
         fi
         ;;
 esac

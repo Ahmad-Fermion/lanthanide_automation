@@ -16,15 +16,31 @@ RE_LN = re.compile(r'^(la|ce|pr|nd|pm|sm|eu|gd|tb|dy|ho|er|tm|yb|lu)$', re.I)
 
 
 def make_coord(text, metal):
-    lines = text.splitlines(keepends=True)
+    """Replace the element field of exactly one Ln atom within $coord.
+
+    TURBOMOLE permits extra per-atom fields, especially ``f`` for a fixed
+    atom.  These fields, original whitespace, and other data groups must
+    survive preparation unchanged.
+    """
     changed = 0
+    in_coord = False
     out = []
-    for line in lines:
-        parts = line.split()
-        if len(parts) >= 4 and RE_LN.fullmatch(parts[3]):
-            line = re.sub(r'(?i)(\s+)(la|ce|pr|nd|pm|sm|eu|gd|tb|dy|ho|er|tm|yb|lu)(\s*)$',
-                          lambda m: m.group(1) + metal + m.group(3), line)
-            changed += 1
+    for line in text.splitlines(keepends=True):
+        stripped = line.lstrip()
+        if re.match(r'(?i)^\$coord(?=\s|$)', stripped):
+            in_coord = True
+        elif stripped.startswith('$'):
+            in_coord = False
+        elif in_coord and not stripped.startswith('#'):
+            parts = line.split()
+            if len(parts) >= 4 and RE_LN.fullmatch(parts[3]):
+                # Locate the fourth *token*, not the end of the row: a fixed
+                # metal may appear as ``... gd f`` rather than ``... gd``.
+                hit = re.match(r'^(\s*\S+\s+\S+\s+\S+\s+)(\S+)', line)
+                if hit is None or hit.group(2) != parts[3]:
+                    raise ValueError('cannot locate lanthanide element in coord row')
+                line = line[:hit.start(2)] + metal + line[hit.end(2):]
+                changed += 1
         out.append(line)
     if changed != 1:
         raise ValueError(f'coord must contain exactly one lanthanide atom (found {changed})')
@@ -102,6 +118,7 @@ def setup_one(base, metal):
         # The in-folder screwer gate imports make_define/SPIN from this helper.
         shutil.copy2(ROOT / 'setup_lanthanides.py', dest / 'setup_lanthanides.py')
         shutil.copy2(ROOT / 'screwer_workflow.py', dest / 'screwer_workflow.py')
+        shutil.copy2(ROOT / 'adaptive_define.py', dest / 'adaptive_define.py')
         shutil.copy2(ROOT / 'tm_workflow.py', dest / 'tm_workflow.py')
         (dest / 'metal.json').write_text(json.dumps({'metal': metal, 'unpaired': SPIN[metal],
                                                      'charge': charge}, indent=2) + '\n')
@@ -114,7 +131,34 @@ def setup_one(base, metal):
         raise
 
 
+
+def prepare_default_restricted(base, metal):
+    """Prepare complementary restricted La/Lu input without submitting it.
+
+    Standard unrestricted projects must keep working without a restricted
+    DEFINE transcript. Existing folders are never overwritten.
+    """
+    if metal not in ('la', 'lu'):
+        return
+    if not (base / 'def_closedshell.inp').is_file():
+        print(f'NOTE {metal}_closedshell: not prepared (no def_closedshell.inp in project root)')
+        return
+    from closed_shell_workflow import prepare
+    try:
+        prepare(base, metal)
+    except (ValueError, OSError, json.JSONDecodeError) as exc:
+        # An optional restricted template must not block standard UHF runs.
+        print(f'WARNING {metal}_closedshell: not prepared ({exc})', file=sys.stderr)
+
+
+
 def main():
+    if '--closed-shell' in sys.argv[1:]:
+        raw = [x for x in sys.argv[1:] if x != '--closed-shell']
+        if '--prepare-only' not in raw:
+            raw.append('--prepare-only')
+        from closed_shell_workflow import main as closed_main
+        return closed_main(raw)
     ap = argparse.ArgumentParser(
         description='Prepare lanthanide folders (14 metals, excluding Pm); do not submit jobs.',
         epilog=(
@@ -125,7 +169,11 @@ def main():
             '  lan-setup --metals sm\n'
             '  lan-setup --metals gd tb\n'
             '  lan-setup\n'
-            'To prepare and submit in one command, use: lan-run num --metals sm'
+            'For La/Lu, also prepare *_closedshell/ when def_closedshell.inp exists; '
+            'never submit jobs.\n'
+            '  lan-setup --metals la lu         # prepare both variants when available\n'
+            '  lan-setup --closed-shell --metals la  # prepare restricted La only\n'
+            'To prepare AND submit in one command, use: lan-run num --metals la lu'
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -142,6 +190,7 @@ def main():
     for metal in args.metals:
         try:
             if setup_one(base, metal): created.append(metal)
+            prepare_default_restricted(base, metal)
         except Exception as e:
             print(f'ERROR {metal}: {e}', file=sys.stderr)
             return 1

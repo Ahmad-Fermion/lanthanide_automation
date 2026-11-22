@@ -3,31 +3,50 @@
 # Does not call define and never creates or modifies input folders.
 set -Eeuo pipefail
 
+# Universal recovery, read-only by default. The old --ridft-only,
+# --full-chain and --continue-only modes retain their legacy semantics.
+for option in "$@"; do
+    case "$option" in
+        --plan|--submit|--json|--frequency)
+            here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+            exec python3 "$here/recover_universal.py" "$@" ;;
+    esac
+done
+if (($# == 0)); then
+    here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+    exec python3 "$here/recover_universal.py" --plan
+fi
+
 usage() {
 cat <<'HELP'
-Restart RIDFT after manual SCF adjustments in an existing metal folder.
-No define or input replacement. Run from the EF project directory.
+Universal recovery (preferred): inspect actual completed stages before resuming.
+No DEFINE rerun, no replacement of user inputs. Works from inside a metal,
+restricted-metal, or nested Screwer calculation directory.
 
-Usage: lan-recover [num|ao] --metal METAL [mode]   (default: no Hessian)
-  No selector = stop after post-JOBEX EIGER; num = NumForce; ao = aoforce.
-  Full names numforce/aoforce also accepted.
+Usage: lan-recover [--plan | --submit] [--frequency auto|none|ao|num]
+  lan-recover --plan                    Read-only plan (also the no-argument default)
+  lan-recover --submit --frequency num  Submit remaining verified stages, NumForce
+  lan-recover --plan --frequency ao     Specify AOFORCE when history is missing
+  lan-recover --plan --base EF_ROOT --metal er
+  lan-recover --plan --base EF_ROOT --metal nd/screwer_nd
+  lan-recover --json                    Read-only machine-readable plan
 
-Modes (choose one):
-  --ridft-only     Restart only RIDFT (default); inspect results manually
-  --continue-only  After a successful recovery, submit remaining stages
-  --full-chain     Restart RIDFT and schedule all remaining dependent stages
+Legacy SCF-only recovery (retained for compatibility; NOT universal):
+  lan-recover [num|ao] --base EF_ROOT --metal METAL [mode]
+  --ridft-only      Restart RIDFT only (legacy default)
+  --continue-only   Submit stages after a prior legacy RIDFT recovery
+  --full-chain      Restart RIDFT and submit subsequent stages
 
-Other options: --base DIR (default: current directory); -h, --help
+IMPORTANT: The legacy modes always require --metal and interpret --base
+as the EF project root. Running `lan-recover num --continue-only` from inside
+metal/ does NOT invoke universal recovery. Legacy recovery may repeat stages
+that universal recovery recognizes as complete. Prefer --plan then --submit.
+The legacy modes are not aliases for --submit and are not recommended for
+new recoveries. Select Hessian only as needed; no method means no Hessian.
 
-Examples:
-  lan-recover --metal tb                      # RIDFT only
-  lan-recover --metal tb --continue-only      # continue, no Hessian
-  lan-recover --metal gd --full-chain         # RIDFT + all subsequent stages, no Hessian
-  lan-recover ao --metal gd --full-chain      # RIDFT + aoforce
-  lan-recover num --metal tb --continue-only  # continue + NumForce
-
-Check/cancel old queued jobs for this metal before recovery. Other metals
-are unaffected. Later occupation_fix still restores occupations/removes $fermi.
+Use lan-run --resume-partial ONLY for a partially submitted SLURM chain;
+use universal lan-recover for scientific failures. Check for active/pending
+SLURM jobs before submitting any new recovery.
 HELP
 }
 

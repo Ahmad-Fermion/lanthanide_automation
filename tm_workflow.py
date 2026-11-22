@@ -7,12 +7,16 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 
 HERE = Path.cwd()
 META = HERE / 'metal.json'
 STATE = HERE / 'workflow_status.json'
 OCC_REFERENCE = HERE / 'initial_occupations'
+RECOVERY_OCC_REFERENCE = HERE / 'recovery_occupations'
 
 
 def now():
@@ -20,7 +24,16 @@ def now():
 
 
 def metadata():
-    return json.loads(META.read_text())
+    if META.is_file():
+        return json.loads(META.read_text())
+    if os.environ.get('TM_MANUAL_RECOVERY') == '1':
+        # Metadata-free legacy Hessian recovery only; no charge or spin guess.
+        metal = os.environ.get('TM_MANUAL_METAL', '')
+        if metal not in {'la', 'ce', 'pr', 'nd', 'sm', 'eu', 'gd', 'tb', 'dy', 'ho', 'er', 'tm', 'yb', 'lu'}:
+            raise RuntimeError('manual recovery requires a verified metal identity')
+        return {'metal': metal, 'unpaired': None, 'charge': None,
+                'source': 'manual Hessian-only recovery'}
+    raise RuntimeError('metal.json missing (not an authorized manual Hessian recovery)')
 
 
 def record(stage, status, message=''):
@@ -102,11 +115,94 @@ def save_initial_occupations():
     print(f'Saved define occupations in {OCC_REFERENCE.name}', flush=True)
 
 
+
+def verified_legacy_occupation_reference(folder):
+    """Return current integer shells only for a verified legacy SCF recovery.
+
+    This is *not* a reconstruction of the original DEFINE occupations. It
+    captures the explicitly present post-SCF integer shell assignment so that
+    Fermi smearing can be removed without inventing an electronic state.
+    The conservative count check currently supports C1 geometry only.
+    Never writes files; safe for use by lan-recover --plan.
+    """
+    folder = Path(folder)
+    marker = folder / 'ridft.resume.ok'
+    if not marker.is_file() or marker.is_symlink():
+        raise RuntimeError('verified legacy RIDFT recovery marker missing')
+    match = re.search(r'(?m)^log=(ridft\.resume\.[A-Za-z0-9_.-]+\.out)\s*$', marker.read_text())
+    if not match:
+        raise RuntimeError('legacy RIDFT recovery marker has no usable log')
+    output = folder / match.group(1)
+    if not output.is_file() or output.is_symlink():
+        raise RuntimeError('verified legacy RIDFT recovery log missing')
+    report = output.read_text(errors='replace')
+    checks = (r'ENERGY\s+CONVERGED\s*!',
+              r'convergence\s+criteria\s+satisfied\s+after\s+\d+\s+iterations',
+              r'ridft\s*:\s*all\s+done')
+    if not all(re.search(expr, report, re.I) for expr in checks):
+        raise RuntimeError('legacy RIDFT log does not demonstrate SCF convergence')
+
+    meta = json.loads((folder / 'metal.json').read_text())
+    unpaired = meta.get('unpaired')
+    if type(unpaired) is not int or unpaired < 0:
+        raise RuntimeError('invalid metal.json unpaired-electron count')
+    ctrl = (folder / 'control').read_text()
+    if not re.search(r'(?mi)^[ \t]*\$symmetry\s+c1\s*$', ctrl):
+        raise RuntimeError('cannot count recovered shell electrons reliably outside C1')
+    fermi = [ctrl[a:b] for name, a, b in group_spans(ctrl) if name == 'fermi']
+    if len(fermi) != 1:
+        raise RuntimeError('expected exactly one $fermi before legacy occupation recovery')
+    nue = re.search(r'\bnue\s*=\s*([+\-]?\d+(?:\.\d+)?)', fermi[0], re.I)
+    if not nue or abs(float(nue.group(1)) - unpaired) > 1e-6:
+        raise RuntimeError('legacy $fermi nue does not match metal.json unpaired count')
+    groups = shell_blocks(ctrl, 'legacy post-SCF control')
+    counts = {}
+    for name in ('alpha', 'beta'):
+        rows = [line.strip() for line in groups[name][2].splitlines()[1:]
+                if line.strip() and not line.lstrip().startswith('#')]
+        if not rows:
+            raise RuntimeError(f'legacy ${name} shells is empty')
+        total = 0
+        seen = set()
+        for line in rows:
+            entry = re.fullmatch(r'([A-Za-z0-9_+\-]+)\s+(\d+)(?:\s*-\s*(\d+))?\s+\(\s*1(?:\.0*)?\s*\)', line)
+            if not entry:
+                raise RuntimeError(f'cannot verify integer legacy ${name} shells: {line}')
+            irrep, first, last = entry.group(1).lower(), int(entry.group(2)), int(entry.group(3) or entry.group(2))
+            if first < 1 or last < first:
+                raise RuntimeError(f'invalid legacy ${name} shell range: {line}')
+            for idx in range(first, last + 1):
+                if (irrep, idx) in seen:
+                    raise RuntimeError(f'duplicate legacy ${name} shell index: {idx}')
+                seen.add((irrep, idx))
+            total += last - first + 1
+        counts[name] = total
+    if counts['alpha'] - counts['beta'] != unpaired:
+        raise RuntimeError('legacy shell counts do not match metal.json unpaired electrons')
+    for name in ('alpha', 'beta'):
+        orbital = folder / name
+        if not orbital.is_file() or orbital.is_symlink() or orbital.stat().st_size == 0:
+            raise RuntimeError(f'legacy {name} orbital file missing or empty')
+    return groups['alpha'][2] + groups['beta'][2]
+
+
+def ensure_recovery_occupation_reference():
+    """Capture a post-SCF recovery reference only when DEFINE's snapshot is absent."""
+    if OCC_REFERENCE.is_file() or RECOVERY_OCC_REFERENCE.is_file():
+        return
+    reference = verified_legacy_occupation_reference(HERE)
+    tmp = RECOVERY_OCC_REFERENCE.with_name(RECOVERY_OCC_REFERENCE.name + '.tmp.' + str(os.getpid()))
+    tmp.write_text(reference)
+    tmp.replace(RECOVERY_OCC_REFERENCE)
+    print('WARNING: original DEFINE occupations unavailable; adopting verified current '
+          'integer shell assignments as recovery_occupations (NOT initial_occupations)', flush=True)
+
 def restore_shells(text):
     """Replace only $alpha/$beta shell groups; preserve all other control groups."""
-    if not OCC_REFERENCE.is_file():
-        raise RuntimeError(f'{OCC_REFERENCE.name} missing; it must be saved immediately after define')
-    expected = shell_blocks(OCC_REFERENCE.read_text(), OCC_REFERENCE.name)
+    source = OCC_REFERENCE if OCC_REFERENCE.is_file() else RECOVERY_OCC_REFERENCE
+    if not source.is_file():
+        raise RuntimeError('neither initial_occupations nor verified recovery_occupations is available')
+    expected = shell_blocks(source.read_text(), source.name)
     current = shell_blocks(text, 'current control')
     changed = any(current[name][2] != expected[name][2] for name in ('alpha', 'beta'))
     # Reverse-order editing preserves the offsets, even if beta precedes alpha.
@@ -182,7 +278,8 @@ def screwer_inheritance(directory):
     if not shells:
         raise RuntimeError(f'{directory}: missing inherited shell occupations')
     if re.search(r'(?im)^[ \t]*\$fermi\b', control):
-        raise RuntimeError(f'{directory}: $fermi unexpectedly present; inspect before screwer continuation')
+        print(f'WARNING {directory}: inherited $fermi retained as configured; '
+              'verify intended SCF smearing and occupations', flush=True)
     return {'orbitals_sha256': orbitals, 'shell_groups': shells}
 
 
@@ -195,6 +292,99 @@ def check_screwer_define():
     """
     record('DEFINE', 'OK', 'Screwer DEFINE finished; no orbital/control comparison')
 
+
+
+# Initial Ln DEFINE may fail when ired tries to construct redundant internal
+# coordinates for a changed metal. Unlike Screwer, these are fresh inputs;
+# retain the metal-specific orbital, EHT, basis and relativistic instructions.
+INITIAL_DEFINE_OUTPUTS = ('control', 'coord', 'basis', 'auxbasis', 'alpha', 'beta',
+                          'mos', 'statistics', 'intdef', 'wherefrom', 'gradient',
+                          'energy', 'hessapprox', 'job.start', 'job.last')
+IREDS_COORD_MENU = re.compile(
+    r'(?im)^([ \t]*a[ \t]+coord[ \t]*\r?\n)[ \t]*ired[ \t]*\r?\n[ \t]*\*[ \t]*(?:\r?\n|$)')
+
+
+def initial_noired_transcript(script):
+    """Replace precisely the geometry menu path; never rewrite chemistry menus.
+
+    DEFINE's no-ired route needs BOTH the geometry terminator '*' and the
+    subsequent 'no'. Simply deleting 'ired' shifts all subsequent answers.
+    """
+    revised, count = IREDS_COORD_MENU.subn(lambda m: m.group(1) + '*\nno\n', script)
+    if count > 1:
+        raise RuntimeError('multiple a coord / ired / * sections; cannot choose a safe retry')
+    return revised if count == 1 else None
+
+
+def run_initial_define():
+    """Run an initial DEFINE transcript; retry cleanly without ired if it fails.
+
+    The original def.inp stays authoritative and is never changed. A retry
+    starts from a snapshot of the PRE-DEFINE inputs, never the failed control.
+    Successful DEFINE is still checked by `check-define` before SCF.
+    """
+    source = HERE / 'def.inp'
+    if not source.is_file() or not source.stat().st_size:
+        raise RuntimeError(f'{source}: missing or empty DEFINE transcript')
+    script = source.read_text()
+    noired = initial_noired_transcript(script)
+
+    def attempt(input_text, filename):
+        result = subprocess.run(['define'], cwd=HERE, input=input_text,
+                                text=True, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, check=False)
+        (HERE / filename).write_text(result.stdout)
+        success = (result.returncode == 0 and
+                   re.search(r'(?i)define\s*:\s*all\s+done|define\s+ended\s+normally',
+                             result.stdout) is not None and
+                   all((HERE / n).is_file() and (HERE / n).stat().st_size
+                       for n in ('control', 'coord', 'basis', 'auxbasis')))
+        return success, result.returncode
+
+    # Templates already using 'a coord / * / no' run once as before.
+    if noired is None:
+        ok, code = attempt(script, 'define.out')
+        if not ok:
+            raise RuntimeError(f'initial DEFINE failed (exit {code}); no recognized '
+                               'a coord / ired / * menu path for retry; see define.out')
+        return
+
+    with tempfile.TemporaryDirectory(prefix='.initial_define_snapshot_', dir=HERE) as temp:
+        backup = Path(temp)
+        present = set()
+        for name in INITIAL_DEFINE_OUTPUTS:
+            item = HERE / name
+            if item.is_symlink():
+                raise RuntimeError(f'{item}: cannot safely snapshot a symlink')
+            if item.is_file():
+                shutil.copy2(item, backup / name)
+                present.add(name)
+
+        def restore():
+            for name in INITIAL_DEFINE_OUTPUTS:
+                target = HERE / name
+                if target.is_symlink():
+                    raise RuntimeError(f'{target}: cannot safely restore a symlink')
+                if name in present:
+                    shutil.copy2(backup / name, target)
+                elif target.is_file():
+                    target.unlink()
+
+        ok, code = attempt(script, 'define.out')
+        if ok:
+            print('Initial DEFINE succeeded with original input', flush=True)
+            return
+        print(f'WARNING initial DEFINE failed (exit {code}); '
+              'retrying without ired from original inputs', flush=True)
+        restore()
+        (HERE / 'def.noired.generated.inp').write_text(noired)
+        ok, code = attempt(noired, 'define.noired.out')
+        if not ok:
+            restore()
+            raise RuntimeError(f'initial DEFINE and no-ired fallback both failed '
+                               f'(fallback exit {code}); prepared inputs restored; '
+                               'see define.out and define.noired.out')
+        print('Initial DEFINE fallback succeeded (a coord / * / no)', flush=True)
 
 def check_define():
     """Verify DEFINE ran against the sole control file; never rewrite its output."""
@@ -215,10 +405,45 @@ def check_define():
     record('DEFINE', 'OK', f'control generated by define; charge={meta.get("charge") if meta.get("charge") is not None else "from def.inp"}, nue={meta["unpaired"]}; no post-define overlay')
 
 
+def check_restricted_define():
+    """Verify DEFINE really generated a restricted closed-shell input.
+
+    Does not infer correct *physical* spin multiplicity, only that the user-
+    requested RHF/RKS-style orbital representation was actually prepared.
+    """
+    meta = metadata()
+    if not meta.get('restricted') or meta.get('unpaired') != 0:
+        raise RuntimeError('restricted validation requires opt-in metadata with zero unpaired electrons')
+    define_log = (HERE / 'define.out').read_text(errors='replace') if (HERE / 'define.out').is_file() else ''
+    if not re.search(r'(?i)define\s+ended\s+normally', define_log):
+        raise RuntimeError('restricted DEFINE did not end normally; see define.out')
+    if re.search(r'(?i)ERROR IN CARTESIAN COORDINATES\s*\?', define_log):
+        raise RuntimeError('restricted DEFINE reported a geometry error; see define.out')
+    ctl = (HERE / 'control').read_text()
+    for group in ('uhf', 'uhfmo_alpha', 'uhfmo_beta', 'alpha shells', 'beta shells', 'fermi'):
+        if re.search(r'(?im)^\s*\$' + re.escape(group) + r'\b', ctl):
+            raise RuntimeError(f'RESTRICTED DEFINE unexpectedly produced ${group}')
+    if not re.search(r'(?im)^\s*\$closed\s+shells\b', ctl):
+        raise RuntimeError('DEFINE did not produce $closed shells')
+    if not re.search(r'(?im)^\s*\$scfmo\b', ctl):
+        raise RuntimeError('DEFINE did not produce $scfmo; expected restricted orbital reference')
+    for group in ('coord', 'atoms', 'dft', 'scfconv', 'basis'):
+        if not re.search(r'(?im)^\s*\$' + group + r'\b', ctl):
+            raise RuntimeError(f'restricted control lacks ${group}')
+    if not (HERE / 'mos').is_file() or not (HERE / 'mos').stat().st_size:
+        raise RuntimeError('DEFINE did not produce nonempty restricted mos file')
+    for name in ('basis', 'auxbasis'):
+        if not (HERE / name).is_file() or not (HERE / name).stat().st_size:
+            raise RuntimeError(f'restricted DEFINE did not generate {name}')
+    record('DEFINE', 'OK', 'restricted orbitals and closed-shell occupations verified')
+
+
 def remove_fermi():
     p = HERE / 'control'
     original = p.read_text()
-    # Restore the occupations saved directly after define before integer SCF.
+    ensure_recovery_occupation_reference()
+    # Restore the occupations saved directly after define, or a verified
+    # legacy post-SCF reference when the original DEFINE snapshot is absent.
     # Other groups ($energy, $grad, $ricore, etc.) are left untouched.
     restored, changed = restore_shells(original)
     fermi = [(start, end) for name, start, end in group_spans(restored) if name == 'fermi']
@@ -331,7 +556,9 @@ def main():
         epilog='Called automatically by the SLURM stages; normally do not run directly.',
     )
     sub = ap.add_subparsers(dest='command', required=True, help='stage helper action')
+    sub.add_parser('check-restricted-define', help='verify restricted molecular orbitals and $closed shells')
     sub.add_parser('check-define', help='verify files and $fermi nue after define without rewriting control')
+    sub.add_parser('run-initial-define', help='run initial DEFINE with a clean no-ired retry when needed')
     sub.add_parser('check-screwer-define', help='legacy nonblocking Screwer DEFINE completion record')
     sub.add_parser('remove-fermi', help='save control.with_fermi, restore define occupations and remove $fermi before integer SCF')
     sub.add_parser('restore-occupations', help='restore define occupations after integer SCF if changed (before jobex)')
@@ -342,7 +569,9 @@ def main():
     sub.add_parser('check-numforce', help='verify NumForce generated numerical Hessian and frequencies')
     args = ap.parse_args()
     try:
-        if args.command == 'check-define': check_define()
+        if args.command == 'check-restricted-define': check_restricted_define()
+        elif args.command == 'check-define': check_define()
+        elif args.command == 'run-initial-define': run_initial_define()
         elif args.command == 'check-screwer-define': check_screwer_define()
         elif args.command == 'remove-fermi': remove_fermi()
         elif args.command == 'restore-occupations': restore_after_integer_scf()

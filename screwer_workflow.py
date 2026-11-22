@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Opt-in one-pass imaginary-mode correction, never changing parent calculations.
+"""Opt-in, bounded imaginary-mode correction, never changing parent calculations.
 
-TURBOMOLE 7.9 VACC.  All work is in a NEW <metal>/screwer_<metal> directory.
+TURBOMOLE 7.9 VACC. Each cycle has its own nested directory.
 Templates screwer.inp and def_screwer.inp belong to the project owner.
 """
 import argparse
@@ -21,8 +21,21 @@ STAGES = ('screwer_jobex_eiger',)
 NEWCOORD_MODE = re.compile(r'shifted\s+along\s+normal\s+mode\s+(\d+)', re.I)
 
 
-def correction_dir(parent, metal):
-    return parent / f'screwer_{metal}'
+def correction_dir(parent, metal, cycle=1):
+    return parent / (f'screwer_{metal}' if cycle == 1 else f'screwer_{metal}_cycle{cycle}')
+
+
+def cycle_directory(base, metal, cycle):
+    if not isinstance(cycle, int) or not 1 <= cycle <= 10:
+        raise ValueError('cycle must be an integer from 1 to 10')
+    path = base / metal
+    for n in range(1, cycle + 1):
+        path = correction_dir(path, metal, n)
+    return path
+
+
+def cycle_parent(base, metal, cycle):
+    return (base / metal) if cycle == 1 else cycle_directory(base, metal, cycle - 1)
 
 
 def legacy_dir(parent):
@@ -108,6 +121,15 @@ def verify_parent(parent, method):
         spec = parent / 'vibspectrum'
         if not spec.is_file() or spec.stat().st_mtime + 1 < record.stat().st_mtime:
             raise RuntimeError(f'{parent}: missing/stale vibspectrum for current attempt')
+        # A DONE flag alone is insufficient: reject an incomplete or inherited
+        # frequency result before starting another computationally costly cycle.
+        for name in ('control', 'coord', 'gradient', 'jobex.out', 'hessian',
+                     'vibspectrum', 'aoforce.out' if method == 'aoforce' else 'numforce.out'):
+            file = parent / name
+            if not file.is_file() or not file.stat().st_size:
+                raise RuntimeError(f'{parent}: verified history but missing/empty {name}')
+        if (parent / 'vibspectrum').stat().st_mtime + 1 < (parent / 'jobex.out').stat().st_mtime:
+            raise RuntimeError(f'{parent}: vibspectrum predates the latest JOBEX')
         source = 'automation'
     else:
         # A manual calculation does not have a workflow_status.json or
@@ -167,18 +189,57 @@ def parse_coordinates(output, parent_coord):
         if not re.fullmatch(r'[A-Za-z]{1,3}', fields[3]):
             raise RuntimeError(f'newcoord has invalid atom label: {line!r}')
         rows.append((fields[3].lower(), line))
+    # A TURBOMOLE coord file may also contain $redundant and other data groups.
+    # Only atom records inside $coord belong in the atom-order comparison.
     orig = []
+    in_coord = False
     for line in parent_coord.read_text().splitlines():
-        fields = line.split()
-        if len(fields) >= 4 and fields[0] != '$coord' and not line.lstrip().startswith('$'):
-            orig.append(fields[3].lower())
+        stripped = line.strip()
+        if stripped.startswith('$coord'):
+            in_coord = True
+            continue
+        if in_coord and stripped.startswith('$'):
+            break
+        if in_coord and stripped and not stripped.startswith('#'):
+            fields = stripped.split()
+            if len(fields) >= 4:
+                orig.append(fields[3].lower())
     if not orig or [row[0] for row in rows] != orig:
         raise RuntimeError('displaced coordinates do not match the original atom count and order')
     return '$coord\n' + '\n'.join(line for _, line in rows) + '\n$end\n'
 
 
-def prepare(base, metal, method, *, min_negative=0):
-    parent = base / metal
+def replace_prepared_child(child, parent, *, force=False):
+    """Discard a correction copy on explicit opt-in; never touch an active job."""
+    if not child.exists() and not child.is_symlink():
+        return
+    if child.is_symlink() or not child.is_dir() or child.parent.resolve() != parent.resolve():
+        raise RuntimeError(f'{child}: existing correction path is not a direct, real directory')
+    if not force:
+        if not sys.stdin.isatty():
+            raise RuntimeError(f'{child}: correction directory already exists; '
+                               'rerun with --overwrite-prepared to replace it')
+        reply = input(f'{child}: replace existing correction directory? [y/N] ').strip().lower()
+        if reply not in ('y', 'yes'):
+            raise RuntimeError(f'{child}: existing directory left untouched')
+    if (child / '.lan_submission_lock').exists() or (child / '.lan_submission_pending').exists():
+        raise RuntimeError(f'{child}: pending/locked submission; cannot overwrite')
+    if shutil.which('squeue') is None:
+        raise RuntimeError('squeue unavailable: cannot rule out active calculations')
+    queue = execute(['squeue', '-h', '-u', os.environ.get('USER', ''), '-o', '%i|%Z'], cwd=parent)
+    if queue.returncode:
+        raise RuntimeError(f'squeue failed: {queue.stdout.strip()}')
+    if any(row.partition('|')[2].strip() == str(child.resolve())
+           for row in queue.stdout.splitlines() if '|' in row):
+        raise RuntimeError(f'{child}: active/pending SLURM job found; cannot overwrite')
+    shutil.rmtree(child)
+    print(f'{child}: replaced prior correction directory at user request', flush=True)
+
+
+def prepare(base, metal, method, *, min_negative=0, define_backend="legacy", cycle=1, max_cycles=1, overwrite_prepared=False):
+    if not (1 <= cycle <= max_cycles <= 10):
+        raise RuntimeError('require 1 <= cycle <= max_cycles <= 10')
+    parent = cycle_parent(base, metal, cycle)
     if not parent.is_dir():
         raise RuntimeError(f'{parent}: no metal directory')
     parent_source = verify_parent(parent, method)
@@ -209,9 +270,9 @@ def prepare(base, metal, method, *, min_negative=0):
                 'source': 'manual TURBOMOLE control and orbitals'}
         print(f'WARNING {metal}: no metal.json; child metadata will not infer '
               'charge or spin from the Screwer DEFINE template', flush=True)
-    child = correction_dir(parent, metal)
-    if child.exists():
-        raise RuntimeError(f'{child}: correction directory already exists; left untouched')
+    child = correction_dir(parent, metal, cycle)
+    if child.exists() or child.is_symlink():
+        replace_prepared_child(child, parent, force=overwrite_prepared)
     if legacy_dir(parent).exists():
         print(f'NOTE {metal}: preserving existing legacy {legacy_dir(parent)}', flush=True)
     if not shutil.which('cpc') or not shutil.which('screwer') or not shutil.which('sdg') or not shutil.which('kdg'):
@@ -241,7 +302,7 @@ def prepare(base, metal, method, *, min_negative=0):
     else:
         (child / 'metal.json').write_text(json.dumps(meta, indent=2) + '\n')
     script_dir = Path(__file__).resolve().parent
-    for name in ('tm_workflow.py', 'turbo.pipeline.slurm',
+    for name in ('tm_workflow.py', 'turbo.pipeline.slurm', 'adaptive_define.py',
                  'turbo.resume.slurm', 'screwer_workflow.py', 'setup_lanthanides.py'):
         shutil.copy2(script_dir / name, child / name)
     screwer_input = (child / 'screwer.inp').read_text()
@@ -295,7 +356,9 @@ def prepare(base, metal, method, *, min_negative=0):
             'define_source': template_name, 'charge': meta.get('charge'),
             'frequency_cm1': dict(negative)[mode], 'negative_modes_first8': negative,
             'method': method, 'prepared_utc': dt.datetime.now(dt.timezone.utc).isoformat(),
-            'one_pass_only': True}
+            'one_pass_only': cycle == 1 and max_cycles == 1, 'define_backend': define_backend,
+            'cycle': cycle, 'max_cycles': max_cycles, 'project_root': str(base),
+            'min_negative_cm1': float(min_negative)}
     (child / 'screwer_prepared.json').write_text(json.dumps(info, indent=2) + '\n')
     print(f'{metal}: screwer prepared mode {mode} ({dict(negative)[mode]:g} cm^-1) in {child}', flush=True)
     return child
@@ -351,6 +414,9 @@ def run_define_with_fallback(child):
         raise RuntimeError(f'{child}: no Screwer preparation manifest')
     info = json.loads(manifest.read_text())
     metal = info.get('metal')
+    backend = info.get('define_backend', 'legacy')
+    if backend not in ('legacy', 'adaptive'):
+        raise RuntimeError(f'{manifest}: unrecognized DEFINE backend {backend!r}')
     if metal not in METALS:
         raise RuntimeError(f'{manifest}: invalid metal')
     primary = child / 'def_screwer.inp'
@@ -380,7 +446,11 @@ def run_define_with_fallback(child):
                     target.unlink()  # newly generated DEFINE input/output only
 
         def attempt(template, logfile):
-            result = execute(['define'], cwd=child, input_text=template.read_text(), timeout=None)
+            if backend == 'adaptive':
+                from adaptive_define import define_supervised
+                result = define_supervised(child, template.read_text())
+            else:
+                result = execute(['define'], cwd=child, input_text=template.read_text(), timeout=None)
             (child / logfile).write_text(result.stdout)
             try:
                 validate_screwer_define(child, result)
@@ -390,7 +460,7 @@ def run_define_with_fallback(child):
 
         first_error = attempt(primary, 'define.out')
         if first_error is None:
-            print(f'{child}: DEFINE succeeded using {primary.name}', flush=True)
+            print(f'{child}: DEFINE succeeded using {primary.name} (backend={backend})', flush=True)
             return
         print(f'WARNING {child}: {primary.name} failed: {first_error}', flush=True)
         restore()
@@ -408,7 +478,7 @@ def run_define_with_fallback(child):
 
 
 def submit(child, method):
-    """Submit one 2-allocation JOBEX/EIGER + Hessian chain; no automatic repeat."""
+    """Submit one 2-allocation Screwer cycle; next cycle uses a fresh directory."""
     manifest = child / 'screwer_prepared.json'
     if not manifest.is_file():
         raise RuntimeError(f'{child}: no screwer preparation record')
@@ -432,6 +502,21 @@ def submit(child, method):
         raise RuntimeError(f'{child}: copied SLURM script lacks DEFINE fallback; inspect/update it manually')
     if shutil.which('sbatch') is None:
         raise RuntimeError('sbatch not found; submit on VACC')
+    # The TURBOMOLE module supplies its own Python on compute nodes.  Pin
+    # the submitter's Python only for the opt-in adaptive backend so the
+    # SLURM allocation can import pexpect without relying on inherited PATH.
+    workflow_python = None
+    if info.get('define_backend', 'legacy') == 'adaptive':
+        workflow_python = os.environ.get('TM_WORKFLOW_PYTHON') or sys.executable
+        if (not os.path.isabs(workflow_python) or
+                not Path(workflow_python).is_file() or
+                ',' in workflow_python or '\n' in workflow_python):
+            raise RuntimeError('adaptive DEFINE needs an absolute Python executable path '
+                               '(use TM_WORKFLOW_PYTHON to select one)')
+        check = execute([workflow_python, '-c', 'import pexpect'], cwd=child)
+        if check.returncode:
+            raise RuntimeError(f'adaptive DEFINE Python {workflow_python} cannot import pexpect; '
+                               'activate the VACC lan-dev environment or set TM_WORKFLOW_PYTHON')
     stages = (*STAGES, method)
     # Lock the child folder, including when submit is invoked automatically.
     lock = child / '.lan_submission_lock'
@@ -448,10 +533,13 @@ def submit(child, method):
             cpus = os.environ.get('TM_CPUS', '20')
             if not cpus.isdecimal() or int(cpus) < 1:
                 raise RuntimeError('invalid TM_CPUS')
+            export_spec = f'ALL,TM_STAGE={stage},TM_SCREWER_CHILD=1'
+            if workflow_python is not None:
+                export_spec += f',TM_WORKFLOW_PYTHON={workflow_python}'
             opts = ['sbatch', '--parsable', '--partition=general', '--time=2-00:00:00',
                     f'--mem={mem}', f'--cpus-per-task={cpus}',
                     f'--job-name=tm-{info["metal"]}-screwer-{stage}',
-                    f'--export=ALL,TM_STAGE={stage},TM_SCREWER_CHILD=1']
+                    f'--export={export_spec}']
             if dep:
                 opts.append(f'--dependency=afterok:{dep}')
             opts.append('turbo.pipeline.slurm')
@@ -532,26 +620,85 @@ def extract_noproj(child):
     return found
 
 
+def advance_cycle(folder):
+    """Advance from a *completed* correction, subject to its pinned cap.
+
+    Intended for the completed Hessian allocation; never repeats the old Hessian.
+    """
+    folder = folder.resolve()
+    manifest = folder / 'screwer_prepared.json'
+    if not manifest.is_file():
+        raise RuntimeError(f'{folder}: not a prepared Screwer correction')
+    info = json.loads(manifest.read_text())
+    cycle = int(info.get('cycle', 1))
+    maximum = int(info.get('max_cycles', 1))
+    if not (1 <= cycle <= maximum <= 10):
+        raise RuntimeError('invalid cycle bounds in Screwer manifest')
+    if cycle >= maximum:
+        print(f'{folder}: reached configured limit of {maximum} Screwer cycle(s)')
+        return None
+    metal = info['metal']
+    base = Path(info.get('project_root') or folder.parents[1]).resolve()
+    if cycle_directory(base, metal, cycle) != folder:
+        raise RuntimeError('Screwer cycle directory does not match recorded project root')
+    next_folder = cycle_directory(base, metal, cycle + 1)
+    if next_folder.exists():
+        raise RuntimeError(f'{next_folder}: next correction already exists; refusing duplicate submission')
+    method = info['method']
+    # Do not re-run an incomplete Hessian, or mistake an inherited spectrum for a fresh result.
+    verify_parent(folder, method)
+    negatives = [(mode, val) for mode, val in spectrum_modes(folder / 'vibspectrum') if val < 0]
+    threshold = float(info.get('min_negative_cm1', 0))
+    selected = [(mode, val) for mode, val in negatives if val < -threshold]
+    if not selected:
+        print(f'{folder}: no modes below -{threshold:g} cm^-1; no additional cycle')
+        return None
+    next_child = prepare(base, metal, method, min_negative=threshold,
+                         define_backend=info.get('define_backend', 'legacy'),
+                         cycle=cycle + 1, max_cycles=maximum)
+    if next_child is not None:
+        submit(next_child, method)
+    return next_child
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description='Opt-in screwer reoptimization of completed imaginary-frequency calculations (one pass only).',
-        epilog=('Examples: lan-screwer num --metals gd --prepare-only; '
-                'lan-screwer num --metals gd; lan-screwer --export-only --metals gd'))
+        description='Opt-in Screwer correction; optionally chain new cycles after verified Hessians.',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=('Examples (run from EF project root):\n'
+                '  lan-screwer ao --metals pr --prepare-only\n'
+                '  lan-screwer ao --metals pr --submit-prepared\n'
+                '  lan-screwer ao --metals lu --cycle 2 --prepare-only\n'
+                '  lan-screwer ao --metals lu --max-cycles 3 --prepare-only\n'
+                '  lan-screwer ao --metals nd --cycle 2 --prepare-only --overwrite-prepared\n'
+                '  lan-screwer --export-only --metals gd\n'
+                'This tool requires a verified Hessian; it is not part of a '
+                'geometry-only/constrained run unless separately requested.'))
     parser.add_argument('method', nargs='?', choices=['num', 'ao', 'numforce', 'aoforce'],
                         help='Hessian method from the completed original calculation')
     parser.add_argument('--base', type=Path, default=Path.cwd(), help='project directory')
     parser.add_argument('--metals', nargs='+', choices=METALS, help='metals to process')
+    parser.add_argument('--cycle', type=int, default=1, help='correction cycle to prepare or submit (default 1)')
+    parser.add_argument('--max-cycles', type=int, default=None, help='maximum automatically chained cycles (1-10); opt-in')
+    parser.add_argument('--folder', type=Path, help=argparse.SUPPRESS)
     action = parser.add_mutually_exclusive_group()
     action.add_argument('--prepare-only', action='store_true', help='create screwer_<metal>/ inputs but do not submit')
     action.add_argument('--submit-prepared', action='store_true', help='submit an already prepared screwer_<metal>/ directory')
     action.add_argument('--export-only', action='store_true', help='extract $noproj data for completed screwer corrections')
     action.add_argument('--clean-frequency', action='store_true', help=argparse.SUPPRESS)
     action.add_argument('--define-fallback', action='store_true', help=argparse.SUPPRESS)
+    action.add_argument('--advance-cycle', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--define-backend', choices=('legacy', 'adaptive'), default='legacy',
+                        help='experimental adaptive pexpect supervisor; pinned at preparation, legacy is default')
+    parser.add_argument('--overwrite-prepared', action='store_true',
+                        help='replace existing preparation if no active job/lock; otherwise interactively ask [y/N]')
     parser.add_argument('--min-imag', type=float, default=0.0,
                         help='only trigger on frequencies strictly below -VALUE cm^-1 (default 0)')
     args = parser.parse_args()
     if not (0 <= args.min_imag < float('inf')):
         parser.error('--min-imag must be a finite nonnegative number')
+    if args.overwrite_prepared and (args.submit_prepared or args.export_only or args.clean_frequency or args.advance_cycle):
+        parser.error('--overwrite-prepared is only valid when creating a new correction')
     if args.define_fallback:
         try:
             run_define_with_fallback(Path.cwd())
@@ -559,24 +706,50 @@ def main():
         except (RuntimeError, OSError, ValueError) as error:
             print(f'ERROR Screwer DEFINE: {error}', file=sys.stderr)
             return 1
+    if args.advance_cycle:
+        if args.folder is None:
+            parser.error('--advance-cycle requires --folder')
+        try:
+            advance_cycle(args.folder)
+            return 0
+        except (RuntimeError, OSError, ValueError, subprocess.TimeoutExpired) as error:
+            print(f'ERROR cycle advance: {error}', file=sys.stderr)
+            return 1
+    if args.folder and (args.clean_frequency or args.export_only):
+        try:
+            if args.clean_frequency:
+                clean_inherited_frequencies(args.folder.resolve())
+            else:
+                extract_noproj(args.folder.resolve())
+            return 0
+        except (RuntimeError, OSError, ValueError) as error:
+            print(f'ERROR {args.folder}: {error}', file=sys.stderr)
+            return 1
     if not args.metals:
         parser.error('--metals is required')
+    if not (1 <= args.cycle <= 10):
+        parser.error('--cycle must be 1..10')
+    if args.max_cycles is not None and not (args.cycle <= args.max_cycles <= 10):
+        parser.error('--max-cycles must be >= --cycle and <= 10')
     method = {'num': 'numforce', 'ao': 'aoforce', 'numforce': 'numforce', 'aoforce': 'aoforce'}.get(args.method)
     if not (args.export_only or args.clean_frequency) and not method:
         parser.error('choose num or ao (unless using --export-only)')
     base = args.base.resolve()
+    maximum = args.max_cycles if args.max_cycles is not None else args.cycle
     failures = 0
     for metal in args.metals:
         try:
             if args.clean_frequency:
-                clean_inherited_frequencies(correction_dir(base / metal, metal))
+                clean_inherited_frequencies(cycle_directory(base, metal, args.cycle))
             elif args.export_only:
-                new_child = correction_dir(base / metal, metal)
+                new_child = cycle_directory(base, metal, args.cycle)
                 extract_noproj(new_child if new_child.is_dir() else legacy_dir(base / metal))
             elif args.submit_prepared:
-                submit(correction_dir(base / metal, metal), method)
+                submit(cycle_directory(base, metal, args.cycle), method)
             else:
-                dest = prepare(base, metal, method, min_negative=args.min_imag)
+                dest = prepare(base, metal, method, min_negative=args.min_imag,
+                               define_backend=args.define_backend, cycle=args.cycle,
+                               max_cycles=maximum, overwrite_prepared=args.overwrite_prepared)
                 if dest is not None and not args.prepare_only:
                     submit(dest, method)
         except (RuntimeError, OSError, subprocess.TimeoutExpired, ValueError) as error:

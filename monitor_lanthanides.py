@@ -209,6 +209,8 @@ def stage_label(stage):
         'occupation_fix': 'OCCUPATIONS', 'integer_ridft': 'INTEGER_SCF',
         'eiger_fix_integer_ridft': 'INTEGER_SCF',
         'jobex_eiger': 'JOBEX', 'screwer_jobex_eiger': 'JOBEX',
+        'screwer_ridft_jobex_eiger': 'JOBEX',
+        'restricted_ridft': 'RIDFT', 'restricted_ridft_no_define': 'RIDFT',
         'jobex': 'JOBEX', 'eiger_post': 'EIGER',
         'numforce': 'FREQ', 'aoforce': 'FREQ',
     }.get(stage, stage.upper() if stage else '-')
@@ -366,11 +368,22 @@ def main():
     for metal, spin in SPIN.items():
         parent = base / metal
         targets.append((metal, parent, spin))
+        restricted = base / f'{metal}_closedshell'
+        if restricted.is_dir():
+            targets.append((f'{metal}_closedshell', restricted, 0))
         # Only display correction calculations when a corresponding folder
         # exists. Keep supporting the initial `screwer/` release for monitoring.
         for child in (parent / f'screwer_{metal}', parent / 'screwer'):
             if child.exists():
                 targets.append((f'{metal}/{child.name}', child, spin))
+                if child.name == f'screwer_{metal}':
+                    previous = child
+                    for cycle in range(2, 11):
+                        next_child = previous / f'screwer_{metal}_cycle{cycle}'
+                        if not next_child.is_dir():
+                            break
+                        targets.append((f'{metal}/screwer_{metal}/cycle{cycle}', next_child, spin))
+                        previous = next_child
 
     attempts = {}
     for label, directory, _ in targets:
@@ -384,10 +397,15 @@ def main():
 
     rows = []
     for label, directory, spin in targets:
-        prepared = (directory / 'metal.json').is_file()
+        attempt = attempts[label]
+        # A successfully submitted metadata-free *manual Hessian recovery* is
+        # tracked without inventing the original molecular charge/spin.
+        tracked_manual = (not (directory / 'metal.json').exists() and
+                          attempt is not None and bool(attempt['jobs']) and
+                          all(stage in ('aoforce', 'numforce') for stage, _ in (attempt['jobs'] if attempt else [])))
+        prepared = (directory / 'metal.json').is_file() or tracked_manual
         history = read_history(directory / 'workflow_history.jsonl')
         state = read_json(directory / 'workflow_status.json')
-        attempt = attempts[label]
         jobs = attempt['jobs'] if attempt else []
         overall, last_stage, slurm, slurm_final, jid, reason = classify(
             directory, prepared, attempt, history, state, queue, queue_error,
