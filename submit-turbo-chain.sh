@@ -13,13 +13,17 @@ Usage: lan-run [num|ao] [options]       (default: no Hessian)
   lan-run ao --metals la lu              (submits unrestricted AND restricted)
   lan-run --metals la lu --prepare-only  (prepares both; no submissions)
   lan-run --closed-shell --metals lu     (restricted-only, still supported)
+  If the master def_closedshell.inp is present, La/Lu automatically prepare
+  AND submit both unrestricted and restricted formulations.
   lan-run = geometry optimization only (no Hessian)
   num = NumForce; ao = aoforce (full names also accepted).
 
 Options:
   --metals sm tb      Only these metals (default: all 14)
   --prepare-only      Prepare folders; submit nothing (including restricted)
-  --include-existing  Submit pristine, previously prepared folders too
+  --include-existing  Submit pristine, previously prepared standard folders;
+                      prepared restricted La/Lu variants are submitted by normal lan-run
+  --closed-shell      Run ONLY restricted La/Lu variants (requires --metals la/lu)
   --resume-partial    Resume an interrupted chain without repeating submitted jobs
   --screwer           After a completed Hessian, check for negative modes and run
                       one screwer reoptimization using master screwer.inp and
@@ -37,6 +41,7 @@ Examples:
   lan-run ao                              # create/submit missing metals, aoforce
   lan-run num --metals gd tb              # two metals, NumForce
   lan-run ao --metals la lu              # both SCF formulations for La/Lu
+  lan-run --metals la lu --prepare-only  # prepare both, submit neither
 
 Existing scientific inputs are preserved; opt-in submissions add only job records.
 New gd/ requires master def_gd.inp.

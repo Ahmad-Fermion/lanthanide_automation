@@ -169,7 +169,11 @@ def main():
             '  lan-setup --metals sm\n'
             '  lan-setup --metals gd tb\n'
             '  lan-setup\n'
-            'To prepare and submit in one command, use: lan-run num --metals sm'
+            'For La/Lu, also prepare *_closedshell/ when def_closedshell.inp exists; '
+            'never submit jobs.\n'
+            '  lan-setup --metals la lu         # prepare both variants when available\n'
+            '  lan-setup --closed-shell --metals la  # prepare restricted La only\n'
+            'To prepare AND submit in one command, use: lan-run num --metals la lu'
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

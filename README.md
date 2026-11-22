@@ -31,14 +31,15 @@ bash install.sh
 
 **Requirements:** VACC account, Python 3, TURBOMOLE 7.9, and SLURM. 
 
-## Four commands to remember
+## Commands to remember
 
 | Command | Purpose |
 | --- | --- |
 | `lan-run` | Prepare missing metal folders and submit the normal SLURM chain |
-| `lan-recover` | Restart failed RIDFT with your manual `control` edits; optionally continue |
-| `lan-setup` | Prepare folders **only**, without submitting |
+| `lan-recover` | **Universal stage-aware recovery**: `--plan` then `--submit` from the metal folder |
+| `lan-setup` | Prepare folders **only**; also prepares restricted La/Lu variants when a template exists |
 | `lan-status` | Show progress; write `workflow_status.csv` |
+| `lan-screwer` | Optional imaginary-frequency correction, with explicit cycles |
 | `lan-validate` | Read-only input validation using optional `turbomoleio` |
 
 By default, `lan-run` stops after geometry optimization and the post-optimization EIGER check, with **no Hessian** (useful for large models). Choose `lan-run num` = **NumForce** (for X2CSR) or `lan-run ao` = **aoforce** to include a Hessian. Full names `numforce`/`aoforce` also work.
@@ -166,24 +167,31 @@ The summary separates **OVERALL**, **LAST STAGE**, **LIVE SLURM**, and **SLURM F
 
 The CSV retains detailed SCF, integer-SCF, geometry, frequency, and orbital-hole fields, plus `overall`, `last_stage`, `slurm_final`, and `status_note`. The `NEG FREQ` column and CSV `negative_freqs` field count strictly negative wave numbers in the first eight mode rows of a current, completed `vibspectrum` file (excluding `-0.00`); `-` means unavailable or unverified. Detailed per-stage history can include earlier attempts; inspect the per-metal `workflow_history.jsonl` when investigating a recovery. The status command is read-only with respect to metal folders: it only updates the project-level `workflow_status.csv`. If `squeue`/`sacct` is unavailable or a job is too old for accounting retention, results may require manual review.
 
-## When RIDFT needs manual intervention
+## Recover interrupted or failed calculations (preferred)
 
-After the original failed/blocked jobs are stopped, edit e.g., `tb/control` manually. From the EF project directory:
-
-```bash
-lan-recover --metal tb                      # run only RIDFT; inspect state
-lan-recover --metal tb --continue-only      # later, if recovery converged; no Hessian
-```
-
-Or, if confident in your changes:
+From an existing metal folder (or Screwer correction folder), inspect the
+non-destructive stage-aware plan **before** submitting. It recognizes already
+completed SCF, occupation adjustment, JOBEX and Hessian work:
 
 ```bash
-lan-recover --metal tb --full-chain         # resume RIDFT + later stages; no Hessian
-lan-recover ao --metal tb --full-chain      # same, ending with aoforce
-lan-recover num --metal tb --continue-only  # continue after recovery, ending with NumForce
+cd EF1739/eu
+lan-recover --plan --frequency num       # no files changed
+lan-recover --submit --frequency num     # submit verified remaining stages
 ```
 
-Like `lan-run`, `lan-recover` only requests a Hessian when `ao` or `num` is specified. `--ridft-only` remains the default recovery mode and never schedules later stages.
+To target a metal from the EF project root, specify both `--base` and `--metal`:
+
+```bash
+lan-recover --plan --base "$PWD" --metal er --frequency num
+```
+
+The older `lan-recover --metal tb --ridft-only|--continue-only|--full-chain`
+commands **still exist for backward compatibility**, but do not call the
+universal planner. Legacy `--continue-only` requires `--metal` and a previous
+legacy recovery; it is *not* equivalent to universal `--submit` and can
+repeat a stage that has already completed. Prefer `--plan` / `--submit` for
+new recoveries. `lan-run --resume-partial` handles incomplete **job
+submissions**, not failures during the scientific calculation.
 
 ## What happens automatically
 
@@ -196,17 +204,17 @@ Like `lan-run`, `lan-recover` only requests a Hessian when `ao` or `num` is spec
 
 Thus `lan-run` submits **3 dependent jobs** without a Hessian, or **4** with one. The three expensive SCF/optimization stages and optional Hessian keep separate **48-hour `general`** allocations with their existing CPU/memory settings. EIGER and occupation editing execute inside those jobs; no extra EIGER/`short` allocations are submitted. Jobs use `afterok` dependencies.
 
-`lan-recover --full-chain` similarly uses **3 jobs** without Hessian, or **4** with it: recovered RIDFT (without `define`), combined EIGER + occupation fix + integer RIDFT, then JOBEX + EIGER, then optional Hessian. `--continue-only` skips the recovered RIDFT job (**2 or 3 jobs**); `--ridft-only` remains **1 job**. Pre-existing metal folders are not modified automatically: older copies of the per-metal SLURM script must be reviewed and updated manually before using these consolidated stages.
+The **legacy-only** `lan-recover --full-chain` similarly uses **3 jobs** without Hessian, or **4** with it: recovered RIDFT (without `define`), combined EIGER + occupation fix + integer RIDFT, then JOBEX + EIGER, then optional Hessian. Legacy `--continue-only` skips the recovered RIDFT job (**2 or 3 jobs**); legacy `--ridft-only` remains **1 job**. Pre-existing metal folders are not modified automatically: older copies of the per-metal SLURM script must be reviewed and updated manually before using these consolidated stages.
 
 After `define`, the initial integer alpha/beta shell assignments are saved in `initial_occupations`. The occupation-fix stage restores those blocks and **removes `$fermi`** before the second RIDFT (existing behavior). Orbital holes are **warnings**; true SCF or geometry failure blocks downstream jobs. `control` is the only TURBOMOLE control file; no `control.template`. The validated NumForce OpenMP environment and `PARNODES=1 NumForce -ri -central` remain unchanged.
 
 **Requirements:** Python 3, SLURM, TURBOMOLE 7.9 on VACC. For new `gd/`, provide `def_gd.inp` in the project root. Defaults: 20 CPUs/20 GB for RIDFT/JOBEX, 100 GB for frequency; overrides via `TM_CPUS`, `RIDFT_MEM`, `JOBEX_MEM`, `HESS_MEM`, `EIGER_CPUS`, `EIGER_MEM` (legacy standalone-stage settings; not used by consolidated submissions).
 
-**Help:** `lan-run --help`, `lan-recover --help`, `lan-setup --help`, `lan-status --help`. The per-metal files (including `chain_submission.tsv`, `initial_occupations`, stage logs and warnings) remain in that EF project. Verify orbitals/occupations and frequencies scientifically.
+**Help:** `lan-run --help`, `lan-recover --help`, `lan-setup --help`, `lan-screwer --help`, `lan-status --help`, `lan-validate --help`. The per-metal files (including `chain_submission.tsv`, `initial_occupations`, stage logs and warnings) remain in that EF project. Verify orbitals/occupations and frequencies scientifically.
 
 ## Optional imaginary-frequency correction (`lan-screwer`)
 
-This is an **opt-in, one-pass** screwer workflow. It does not change existing
+This is an **opt-in Screwer correction** workflow (one pass by default; additional cycles are explicitly selected). It does not change existing
 `lan-run` or `lan-recover` behavior unless selected. `lan-status` also
 shows separate rows for any correction directories that exist.
 Place your **own tested** `screwer.inp` (mode/displacement prompts) and
@@ -359,10 +367,14 @@ SLURM submissions launched from the short gate job and actual TURBOMOLE
 
 ## Development branch: turbomoleio integration and stage-aware recovery
 
-The experimental additions below are **not validated on VACC/TURBOMOLE 7.9**.
-Use them only on independent copies of calculations and keep your production
-installation untouched until the tests have passed. Installing into
-`$HOME/bin/lan-dev` keeps the commands separate from production.
+Some development additions have now been tested on VACC/TURBOMOLE 7.9:
+initial no-`ired` recovery for eight EF1741 X2CSR metals; restricted La/Lu
+preparation and execution; manually selected Screwer cycle-2 preparation and
+submission; and stage-aware recovery after completed SCF/JOBEX stages.
+These checks do not establish complete coverage of every combination or
+long-running calculation outcome. Fully dynamic DEFINE remains **unfinished**;
+the adaptive backend still supervises existing `.inp` templates. Until the
+merge is reviewed, keep development installed separately in `$HOME/bin/lan-dev`.
 
 ### Input inspection
 
@@ -374,10 +386,11 @@ recognizes the enclosing EF project. Repeated result data groups like `$last`,
 longer cause false FAILs. It is strictly read-only and is **not a proof** that
 one has the correct electronic ground state.
 
-### Universal recovery (experimental)
+### Universal stage-aware recovery
 
-`lan-recover` retains its original `--metal ... --ridft-only|--full-chain|--continue-only`
-behavior. New **read-only by default** recovery planning works from inside a
+`lan-recover` still accepts legacy `--metal ... --ridft-only|--full-chain|--continue-only`
+syntax, but **prefer universal `--plan` and `--submit`**. Stage-aware recovery
+is read-only by default and works from inside a
 metal folder or its `screwer_<metal>` correction child:
 
 ```
@@ -445,7 +458,7 @@ When a Hessian method (`ao` or `num`) is supplied, **both** formulations receive
 that Hessian stage. With no method, **neither** is submitted for a Hessian,
 which is appropriate for constrained-geometry optimizations.
 
-### Opt-in restricted (closed-shell) La/Lu
+### Explicit restricted-only (closed-shell) La/Lu
 
 The whole **complex** must admit an even-electron closed-shell state; a La(III)
 or Lu(III) metal center alone is insufficient proof of that state. Provide a
@@ -478,7 +491,8 @@ of the EHT charge with `metal.json`. Changes to prepared `coord` or `control`
 remain subject to the existing separate checks. Already-submitted restricted
 chains cannot be submitted twice. DEFINE must terminate
 normally and produce `$closed shells`, `$scfmo`, and `mos`; otherwise RIDFT
-will not start. These paths require a real VACC DEFINE test.
+will not start. Restricted La/Lu preparation and the restricted RIDFT/JOBEX path have been exercised on VACC;
+charge, occupations and geometry still require scientific verification for each model.
 
 ### Opt-in adaptive Screwer supervisor
 
@@ -541,8 +555,9 @@ Upon successful Hessian verification, each cycle checks the first eight
 submits the next cycle. The cap is immutable in the prepared manifest. No
 looping occurs by default (`--max-cycles` omitted means only the selected
 cycle). Automatic scheduling errors are reported in `cycle-advance.log` and
-do not invalidate an otherwise successful Hessian. This feature is
-**development-only** until tested with TURBOMOLE 7.9 and SLURM on VACC.
+do not invalidate an otherwise successful Hessian. Manual cycle-2 preparation and submission have been tested on VACC.
+Fully automatic multi-cycle advancement remains **development-only** until
+its scheduled progression is verified end-to-end.
 
 Universal recovery now recognizes nested Screwer cycles as well; it still
 never re-runs Screwer displacement or DEFINE automatically.
@@ -561,8 +576,9 @@ is retained as `def.noired.generated.inp` for inspection. If both fail, the
 pre-DEFINE files are restored and no SCF begins. When a transcript already uses
 the no-`ired` route, it is executed once without modification.
 
-This must be tested on a new development metal folder on VACC before merging
-into production. It does not replace the existing Screwer continuation fallback.
+This fallback has been exercised successfully through initial DEFINE and
+RIDFT startup for eight EF1741 X2CSR metal folders on VACC. It does not
+replace the existing Screwer continuation fallback.
 
 
 ### Replacing an existing Screwer preparation

@@ -664,8 +664,16 @@ def advance_cycle(folder):
 def main():
     parser = argparse.ArgumentParser(
         description='Opt-in Screwer correction; optionally chain new cycles after verified Hessians.',
-        epilog=('Examples: lan-screwer num --metals gd --prepare-only; '
-                'lan-screwer num --metals gd; lan-screwer --export-only --metals gd'))
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=('Examples (run from EF project root):\n'
+                '  lan-screwer ao --metals pr --prepare-only\n'
+                '  lan-screwer ao --metals pr --submit-prepared\n'
+                '  lan-screwer ao --metals lu --cycle 2 --prepare-only\n'
+                '  lan-screwer ao --metals lu --max-cycles 3 --prepare-only\n'
+                '  lan-screwer ao --metals nd --cycle 2 --prepare-only --overwrite-prepared\n'
+                '  lan-screwer --export-only --metals gd\n'
+                'This tool requires a verified Hessian; it is not part of a '
+                'geometry-only/constrained run unless separately requested.'))
     parser.add_argument('method', nargs='?', choices=['num', 'ao', 'numforce', 'aoforce'],
                         help='Hessian method from the completed original calculation')
     parser.add_argument('--base', type=Path, default=Path.cwd(), help='project directory')
@@ -683,7 +691,7 @@ def main():
     parser.add_argument('--define-backend', choices=('legacy', 'adaptive'), default='legacy',
                         help='experimental adaptive pexpect supervisor; pinned at preparation, legacy is default')
     parser.add_argument('--overwrite-prepared', action='store_true',
-                        help='replace an existing Screwer preparation if no job is using it')
+                        help='replace existing preparation if no active job/lock; otherwise interactively ask [y/N]')
     parser.add_argument('--min-imag', type=float, default=0.0,
                         help='only trigger on frequencies strictly below -VALUE cm^-1 (default 0)')
     args = parser.parse_args()
