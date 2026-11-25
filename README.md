@@ -1,5 +1,7 @@
 # Lanthanide Automation
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
 A Python and Bash toolkit for automating lanthanide density functional theory (DFT) calculations with TURBOMOLE and SLURM on high-performance computing (HPC) clusters.
 
 The workflow generates metal-specific inputs from a shared molecular template and runs calculations across 14 trivalent lanthanides (La–Lu, excluding Pm). It automates structure preparation, calculation setup, dependent job submission, output parsing, monitoring, and recovery of failed calculations. It is designed for reproducible studies of lanthanide complexes across molecular models and computational methods.
